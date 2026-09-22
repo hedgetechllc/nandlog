@@ -10,17 +10,17 @@
 
 // Library Version -----------------------------------------------------------------------------------------------------
 
-// The major number changes when an on-flash or wire structure changes shape, so a consumer that has to care
-// can refuse to build rather than discover it at runtime:
+// The major number changes when anything a consumer built against has to be changed to keep working.
+// A consumer that cares can then refuse to build rather than discover it at runtime:
 //
 //     #if (NANDLOG_VERSION_MAJOR != 1)
 //     #error "This application understands nandlog 1.x page and stream layouts only"
 //     #endif
 //
-// The minor number changes for anything else: added functions, policy knobs, chip drivers, behaviour that
-// does not move a byte on the part. NANDLOG_VERSION_AT_LEAST() is the test for a feature added in a minor
-// release. Note that this versions the LIBRARY; NANDLOG_FORMAT_VERSION below versions the RECORD GRAMMAR a
-// particular build writes, and the two move independently
+// The minor number changes for additions: new functions, new policy knobs, new chip drivers, behaviour that
+// does not move a byte on the part and breaks no caller. NANDLOG_VERSION_AT_LEAST() is the test for a feature
+// added in a minor release. Note that this versions the LIBRARY; NANDLOG_FORMAT_VERSION below versions the
+// RECORD GRAMMAR a particular build writes, and the two move independently
 #define NANDLOG_VERSION_MAJOR                       1
 #define NANDLOG_VERSION_MINOR                       1
 
@@ -79,6 +79,18 @@ typedef struct __attribute__ ((__packed__))
 #define NANDLOG_MAX_DATA_BYTES_PER_PAGE             (NANDLOG_MAX_PAGE_SIZE_BYTES - sizeof(nandlog_page_header_t))
 #define NANDLOG_META_HEADER_CRC_BYTES               (sizeof(nandlog_meta_header_t) - (2 * sizeof(uint32_t)))
 
+#define NANDLOG_MAX_LISTED_EPOCHS                   16
+
+// What the metadata ring still says about one epoch
+typedef struct
+{
+   uint32_t epoch;               // the generation number
+   uint32_t created_timestamp;   // whatever the caller stamped when the epoch began
+   uint32_t first_page;          // physical page its sequence 0 was written to
+   uint16_t details_length;      // bytes of caller-defined details the slot carries
+   bool is_current;              // whether this is the epoch being written now
+} nandlog_epoch_info_t;
+
 
 // Offload Wire Format -------------------------------------------------------------------------------------------------
 
@@ -128,15 +140,37 @@ void nandlog_disable(bool disable);
 // Only known once nandlog_init() has asked the chip its geometry
 uint32_t nandlog_data_bytes_per_page(void);
 
-// Begin a new epoch, described by an opaque caller-defined blob of at most NANDLOG_MAX_METADATA_BYTES. The
+// Begin a new epoch, described by an opaque caller-defined blob of at most NANDLOG_MAX_EPOCH_DETAILS_BYTES. The
 // log neither reads nor interprets the blob. Everything logged previously stays on the part but stops being
-// reachable, since reads only ever cover the current epoch. Must be called inside a maintenance session, and
+// reachable, since reads only ever cover the current epoch. Must be called inside a session, and
 // returns false if it was not, if the blob is too large, or if no slot in the metadata ring would take it
-bool nandlog_store_metadata(const void *blob, uint16_t length);
+bool nandlog_begin_epoch(const void *blob, uint16_t length);
 
-// Copy back the blob most recently stored, truncated to 'length'. Zero-fills if the log has no valid
-// metadata, so a caller that never stored any reads zeros rather than stale bytes
-void nandlog_retrieve_metadata(void *blob, uint16_t length);
+// Copy back the details of whichever epoch is currently selected, truncated to 'length'. Zero-fills if there
+// are none, so a caller that never stored any reads zeros rather than stale bytes
+void nandlog_retrieve_epoch_details(void *blob, uint16_t length);
+
+// How many epochs the metadata ring still describes, the current one included, capped at
+// NANDLOG_MAX_LISTED_EPOCHS. Costs one pass over the ring, reading a header per slot
+uint32_t nandlog_epoch_count(void);
+
+// Describe the index-th epoch, newest first, so index 0 is always the current one. False once the index runs
+// past what the ring describes. Costs the same pass as nandlog_epoch_count()
+bool nandlog_epoch_info(uint32_t index, nandlog_epoch_info_t *info);
+
+// Point reads at an epoch other than the one being written.
+//
+// AN EARLIER EPOCH IS NOT PRESERVED, only left alone: the write head sweeps forward from where the previous
+// generation stopped and erases each block just before it needs it, so an epoch is eaten from its start as
+// the current one grows. What comes back is whatever is left, and a page that has been swept over reads as a
+// gap exactly like one that rotted. A read that yields nothing means the epoch is gone, not that it never
+// existed -- compare against nandlog_epoch_info(), which still describes it from the ring.
+//
+// Writing is refused while an earlier epoch is selected, so a download cannot be confused for a place to put
+// data. Must be called inside a session, fails while a read is open, and returns false if no slot in the ring
+// names that epoch. nandlog_select_current_epoch() goes back, and so does ending the session
+bool nandlog_select_epoch(uint32_t epoch);
+void nandlog_select_current_epoch(void);
 
 // Append one record to the page being assembled in RAM. With NANDLOG_RECORD_FRAMING on, the record is
 // prefixed with its own data length, costing a byte. 'record_type' and 'data' are opaque to the log; the
@@ -154,15 +188,15 @@ bool nandlog_has_buffered_data(void);
 
 // Hold the part powered across a run of operations, instead of waking and sleeping it around each one.
 // Reading and storing metadata both require a session; ordinary logging does not. Sessions do not nest
-void nandlog_enter_maintenance_mode(void);
-void nandlog_exit_maintenance_mode(void);
+void nandlog_begin_session(void);
+void nandlog_end_session(void);
 
 // Open a read over the current epoch, bounded by timestamp. Zero for either bound means "from the beginning"
 // and "to the end"; both bounds are resolved here, so nothing downstream has to seek again. Has no effect
-// outside a maintenance session. While a read is open, writing is refused
+// outside a session. While a read is open, writing is refused
 void nandlog_begin_reading(uint32_t starting_timestamp, uint32_t ending_timestamp);
 
-// Close a read, whether or not it ran to completion. Implied by nandlog_exit_maintenance_mode()
+// Close a read, whether or not it ran to completion. Implied by nandlog_end_session()
 void nandlog_end_reading(void);
 
 // Measure the open read: how many pages it will yield, including any that turn out to be unreadable, and how

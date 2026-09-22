@@ -62,7 +62,7 @@ void nandlog_port_unlock(void)
 
 // SPI Transfers -------------------------------------------------------------------------------------------------------
 
-void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t address_length, void *read_buffer, uint32_t read_length)
+void nandlog_port_transfer_read(uint8_t command, const void *address, uint32_t address_length, void *read_buffer, uint32_t read_length)
 {
    // Send one command byte followed by 'address_length' address bytes, then clock 'read_length' bytes back
    // into 'read_buffer', with chip-select asserted across the whole exchange.
@@ -77,7 +77,7 @@ void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t addres
    // be retried has to end in nandlog_port_fatal()
 }
 
-void nandlog_port_spi_write(uint8_t command, const void *address, uint32_t address_length, const void *write_buffer, uint32_t write_length)
+void nandlog_port_transfer_write(uint8_t command, const void *address, uint32_t address_length, const void *write_buffer, uint32_t write_length)
 {
    // The same exchange in the other direction: one command byte, 'address_length' address bytes, then
    // 'write_length' bytes out of 'write_buffer', chip-select asserted throughout, split across transactions

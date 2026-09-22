@@ -299,7 +299,7 @@ void nandlog_port_fatal(const char *reason)
    longjmp(fatal_jump, 1);
 }
 
-void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t address_length, void *read_buffer, uint32_t read_length)
+void nandlog_port_transfer_read(uint8_t command, const void *address, uint32_t address_length, void *read_buffer, uint32_t read_length)
 {
    const uint8_t *addr = (const uint8_t*)address;
    uint8_t *out = (uint8_t*)read_buffer;
@@ -341,10 +341,15 @@ void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t addres
 
       case SIM_COMMAND_READ:
       {
+         // The address is a 16-bit column, most significant byte first, then a dummy byte
+         const uint32_t column = (addr && (address_length >= 2)) ? (((uint32_t)addr[0] << 8) | addr[1]) : 0;
          const uint8_t *src = page_at(read_page_address);
-         const uint32_t available = page_stride;
          memset(out, 0xFF, read_length);
-         memcpy(out, src, (read_length < available) ? read_length : available);
+         if (column < page_stride)
+         {
+            const uint32_t available = page_stride - column;
+            memcpy(out, src + column, (read_length < available) ? read_length : available);
+         }
          break;
       }
 
@@ -354,7 +359,7 @@ void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t addres
    }
 }
 
-void nandlog_port_spi_write(uint8_t command, const void *address, uint32_t address_length, const void *write_buffer, uint32_t write_length)
+void nandlog_port_transfer_write(uint8_t command, const void *address, uint32_t address_length, const void *write_buffer, uint32_t write_length)
 {
    const uint8_t *addr = (const uint8_t*)address;
    const uint8_t *in = (const uint8_t*)write_buffer;

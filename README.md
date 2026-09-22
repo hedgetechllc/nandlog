@@ -17,6 +17,23 @@ about 18 kB of RAM and no dynamic allocation at all.
 [Versioning](#versioning) · [Testing](#testing) · [Adding a part](#adding-a-part)
 
 
+## Vocabulary
+
+Four words are used precisely throughout, because two of them name things that are easy to confuse.
+
+| term | what it means |
+|---|---|
+| **epoch** | one generation of the log: a numbered run, with its own start page and its own sequence numbering from 0. Reads only ever cover the current epoch |
+| **details** | the caller's opaque blob describing an epoch. The log stores it, checksums it and hands it back; it never looks inside |
+| **metadata ring** | the region at the bottom of the array where each epoch's *record* lives — the slot naming its number and its start page. The word describes the on-flash structure, not the caller's blob |
+| **session** | a bracketed scope that holds the part powered across a run of operations instead of waking and sleeping it around each one. Reading and storing details both need one; ordinary logging does not |
+
+The API uses exactly these words. `nandlog_begin_epoch()` begins an epoch and stores its details;
+`nandlog_begin_session()` / `nandlog_end_session()` open and close a session. Before 2.0 those were
+`nandlog_store_metadata()` and `nandlog_enter`/`exit_maintenance_mode()`, which named a secondary effect and
+a mode that was really a scope — see [Upgrading from 1.x](#upgrading-from-1x).
+
+
 ## What it does and does not do
 
 **Does.** Stores opaque records. Survives power loss at any point, including part-way through a program or
@@ -72,7 +89,7 @@ Four seams, each of which exists because something concrete had to cross it.
         application
     ─────────────────────────  nandlog.h        the log's API: records in, pages out
         nandlog.c              the log core: framing, CRCs, epochs, the write head, bad-block policy
-    ─────────────────────────  nandlog_chip.h   eleven functions: what the log needs from a part
+    ─────────────────────────  nandlog_chip.h   twelve functions: what the log needs from a part
         chips/nandlog_chip_<PART>.c             one self-contained driver per part
     ─────────────────────────  nandlog_port.h   thirteen functions: transfers, init, lock, power, delays, faults
         your nandlog_port.c    the only file you write
@@ -95,13 +112,13 @@ Nothing is derived and nothing has a silent default — anything missing is a na
 
 | setting | meaning |
 |---|---|
-| `NANDLOG_HAS_HARDWARE` | whether a part is fitted at all. When it is not, the library compiles to stand-ins that accept everything and return nothing, so the application above needs no conditionals of its own |
+| `NANDLOG_HAS_HARDWARE` | whether a part is fitted at all. **Defaults to 0, so a build must opt in.** When it is 0 the library compiles to stand-ins that accept everything and return nothing, so the application above needs no conditionals of its own — and, being stand-ins, they also log nothing |
 | `NANDLOG_MAX_PAGE_SIZE_BYTES` | the largest page you will spend RAM on. Every buffer in the library is sized from this |
 | `NANDLOG_MAX_SPARE_SIZE_BYTES` | the same for the spare area |
 | `NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL` | program or erase attempts on one block before it is retired |
 | `NANDLOG_ERASE_AHEAD_BLOCKS` | blocks kept erased ahead of the write head, so a page write never waits on an erase |
 | `NANDLOG_PAGE_PLACEMENT_ATTEMPTS` | blocks one page write may relocate through before the log concludes the part will not hold it |
-| `NANDLOG_MAX_METADATA_BYTES` | largest caller-defined blob stored alongside the log |
+| `NANDLOG_MAX_EPOCH_DETAILS_BYTES` | largest caller-defined blob stored alongside the log |
 | `NANDLOG_TIMESTAMP_TOLERANCE_MS` | how far a timestamp may step backwards before it is treated as the time base having moved rather than as writer disagreement |
 | `NANDLOG_RECORD_FRAMING` | whether each record carries its own length. **On by default** |
 | `NANDLOG_BUSY_POLL_INTERVAL_US` | how often to poll the part's BUSY bit |
@@ -199,7 +216,7 @@ tested against the remaining length, so a zero-length read still issues the sing
 the smaller-page parts rely on to complete a command:
 
 ```c
-void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t address_length,
+void nandlog_port_transfer_read(uint8_t command, const void *address, uint32_t address_length,
                            void *read_buffer, uint32_t read_length)
 {
    uint32_t instruction = command, retries_remaining = 4;
@@ -240,7 +257,7 @@ void nandlog_port_spi_read(uint8_t command, const void *address, uint32_t addres
    }
 }
 
-// nandlog_port_spi_write() is this function with the directions reversed, and splits the payload the same
+// nandlog_port_transfer_write() is this function with the directions reversed, and splits the payload the same
 // way for the same reason
 ```
 
@@ -343,19 +360,28 @@ from the metadata ring and locates the write head within it. It is safe to call 
 
 ### Starting an experiment
 
-Every generation of the log is an *epoch*. Beginning one writes a fresh metadata slot describing it;
-everything logged previously stays on the part but stops being reachable, because reads only ever cover the
-current epoch. The blob is opaque — the log neither reads nor interprets it.
+`nandlog_begin_epoch()` **begins a new epoch**, which is its main effect; storing the details blob is
+what it does on the way. It writes a fresh slot in the metadata ring naming the new epoch and the page its
+sequence 0 lives at, and the previous epoch stops being reachable through the API.
+
+The previous epoch's pages are *not erased*. That is deliberate and it is not the same as keeping them:
+erasing the array to start a run would cost thousands of block erases, burn erase cycles on blocks nothing
+is about to use, and leave a half-erased array if power went at the wrong moment. Instead the write head
+sweeps forward from where it was and erases each block just before it needs it, so the old epoch is
+reclaimed lazily, exactly when the space is wanted. Until the head comes back around to it, the old data is
+still physically there and still parses out of a raw image dump with `tools/nandlog_parse.py`, which reports
+every epoch it finds. What the epoch number buys is that a stale page is *unmistakable* rather than merely
+unexpected, which is what makes recovery after a reboot decidable.
 
 ```c
-nandlog_enter_maintenance_mode();
-nandlog_store_metadata(&experiment_details, sizeof(experiment_details));
-nandlog_exit_maintenance_mode();
+nandlog_begin_session();
+nandlog_begin_epoch(&experiment_details, sizeof(experiment_details));
+nandlog_end_session();
 ```
 
-A *maintenance session* holds the part powered across a run of operations instead of waking and sleeping it
-around each one. Reading and storing metadata both require one; ordinary logging does not. Sessions do not
-nest.
+A *session* holds the part powered across a run of operations instead of waking and sleeping it around each
+one. Reading and storing details both require one; ordinary logging does not. Sessions do not nest.
+`nandlog_begin_session()` and `nandlog_end_session()` are what open and close one.
 
 ### Logging
 
@@ -386,7 +412,7 @@ it, and still serves reads.
 ### Reading it back
 
 ```c
-nandlog_enter_maintenance_mode();
+nandlog_begin_session();
 nandlog_begin_reading(start_timestamp, end_timestamp);   // zero for either bound means "no bound"
 
 uint32_t num_pages = 0, num_bytes = 0;
@@ -401,7 +427,7 @@ for (uint32_t i = 0; i < num_pages; ++i)
 }
 
 nandlog_end_reading();
-nandlog_exit_maintenance_mode();   // implies nandlog_end_reading()
+nandlog_end_session();   // implies nandlog_end_reading()
 ```
 
 While a read is open, writing is refused. Both time bounds are resolved inside `nandlog_begin_reading()`,
@@ -431,6 +457,38 @@ while (nandlog_framed_next_record(payload, length, &offset, &record, &record_byt
 The prefixes are authoritative for stepping. A record that decodes is still advanced past by its declared
 length rather than by whatever the decoder consumed, so the two cannot drift apart; and a record the reader
 does not recognise is stepped over exactly, instead of costing it the rest of the page.
+
+### Reading an earlier epoch
+
+An earlier epoch is not preserved, only left alone, so what is still there is whatever the current epoch has
+not yet swept over. The ring still describes it either way:
+
+```c
+nandlog_begin_session();
+
+for (uint32_t i = 0; i < nandlog_epoch_count(); ++i)
+{
+   nandlog_epoch_info_t info;
+   if (nandlog_epoch_info(i, &info))                  // index 0 is always the current epoch
+      printf("epoch %u, created %u, %u bytes of details%s\n",
+             info.epoch, info.created_timestamp, info.details_length, info.is_current ? " (current)" : "");
+}
+
+if (nandlog_select_epoch(previous_epoch))
+{
+   nandlog_retrieve_epoch_details(&details, sizeof(details));   // that epoch's details, not the live one's
+   nandlog_begin_reading(0, 0);
+   // ... same read loop as above; a page that has been swept over reads as a gap ...
+   nandlog_end_reading();
+}
+
+nandlog_select_current_epoch();
+nandlog_end_session();                                // also returns to the current epoch
+```
+
+**Writing is refused while an earlier epoch is selected**, so a download cannot be mistaken for somewhere to
+put data. A read that yields nothing means the epoch has been overwritten, not that it never existed —
+compare against `nandlog_epoch_info()`, which still describes it from the ring.
 
 ### Peeking at what was just written
 
@@ -588,8 +646,8 @@ magnitude. Symbols:
 | — one page commit, block fails | ≤ `NANDLOG_PAGE_PLACEMENT_ATTEMPTS` × (1 erase + ≤ pages-per-block relocations + an O(B) walk to the next good block) |
 | — once per block written | `NANDLOG_ERASE_AHEAD_BLOCKS` erases, each after an O(B) walk |
 | `nandlog_flush(true)` | one page commit |
-| `nandlog_store_metadata()` | ≤ M programs worst case, 1 typically, plus 1 erase for the new log start, `NANDLOG_ERASE_AHEAD_BLOCKS` for the window, and 1 more when the ring slot lands on a block boundary |
-| `nandlog_retrieve_metadata()` | 1 page read |
+| `nandlog_begin_epoch()` | ≤ M programs worst case, 1 typically, plus 1 erase for the new log start, `NANDLOG_ERASE_AHEAD_BLOCKS` for the window, and 1 more when the ring slot lands on a block boundary |
+| `nandlog_retrieve_epoch_details()` | 1 page read |
 | `nandlog_begin_reading(0, 0)` | none |
 | `nandlog_begin_reading(t, 0)` | **O(E) page reads**, stopping at the first page that reaches the bound |
 | `nandlog_begin_reading(0, t)` | **O(E) page reads** — a full pass over the epoch, always |
@@ -602,6 +660,9 @@ magnitude. Symbols:
 | `nandlog_retransmit_total_bytes()` | **O(r log E) page reads** |
 | `nandlog_retrieve_retransmit_page()` | O(log E) page reads |
 | `nandlog_read_recent_page(k)` | 1 page read; O(k) arithmetic, no reads, to walk back |
+| `nandlog_epoch_count()` / `nandlog_epoch_info()` | O(M) header reads — one pass over the ring, nothing cached between calls |
+| `nandlog_select_epoch()` | O(M) header reads, plus 2 |
+| `nandlog_select_current_epoch()` | none |
 | `nandlog_framed_next_record()` | none |
 | `nandlog_chip_is_bad_block()` | none; O(table entries) in RAM — ≤ 256 for the Alliance part, 20 for the Winbond |
 
@@ -611,8 +672,8 @@ A 100-page epoch on a 4096-block part, 4 KB pages:
 
 | | page reads | bus bytes |
 |---|---|---|
-| first ever boot (factory bad-block scan) | 4689 | 19.3 MB |
-| every boot after | 612 | 2.5 MB |
+| first ever boot (factory bad-block scan) | 4689 | 43.7 kB |
+| every boot after | 614 | 24.9 kB |
 | `begin_reading(0, 0)` | 0 | — |
 | `begin_reading(t, 0)`, bound 14 pages in | 14 | — |
 | `begin_reading(0, t)` | 100 | — |
@@ -625,9 +686,17 @@ So **a fully time-bounded download with an exact byte total reads the epoch abou
 once for the end bound, once for the byte total over the span, once more to serve it. Dropping the end bound
 and filtering on the host removes the first pass; passing `NULL` for the byte total removes the second.
 
-The two costs worth designing around are the **metadata ring scan at every boot** — 512 full page reads on a
-64-page-per-block part, regardless of how much is in the ring — and the **end-bound seek**, which is a full
-pass over the epoch every time a bounded download opens.
+Almost everything the log reads is a 32-byte header out of a 4 KB page, so it reads 32 bytes: boot, the
+write-head search, the time-bound seek and the sequence-number lookup all go through
+`nandlog_chip_read_page_region()` rather than pulling whole pages across the bus. Only `read_span()`'s byte
+pass needs a whole page, because it verifies payload CRCs.
+
+**Page-read counts are unchanged by that** — it saves bus time, not flash time. Latching a page into the
+chip's cache register is the slow part and is paid either way; the difference is how much of that register
+then comes across the wire. On a full epoch of a 4 KB-page part, a bounded download open reads 257,024
+headers: 8.2 MB rather than 1.05 GB, which at 48 MHz is the difference between about eighteen seconds and
+about three minutes. The cost worth designing around is therefore the **end-bound seek itself** — a full
+pass over the epoch every time a bounded download opens — not the bytes it moves.
 
 ### Relocation
 
@@ -689,12 +758,17 @@ All static, all sized at compile time, nothing allocated. Measured with `NANDLOG
 
 | | bytes | what it is |
 |---|---|---|
-| `nandlog.c` | 13,408 | `3 × NANDLOG_MAX_PAGE_SIZE_BYTES` + `4 × NANDLOG_MAX_RETRANSMIT_PAGES` + ~90 bytes of state |
+| `nandlog.c` | 13,425 | `3 × NANDLOG_MAX_PAGE_SIZE_BYTES` + `4 × NANDLOG_MAX_RETRANSMIT_PAGES` + ~110 bytes of state |
 | `chips/nandlog_chip_AS5F18G04SND.c` | 5,385 | one page-with-spare scratch buffer, a 256-entry bad-block table |
 | `chips/nandlog_chip_W25N01GWZEIG.c` | 2,193 | one page-with-spare scratch buffer, a 20-entry LUT mirror |
 
 ≈ **18.4 kB** for the Alliance part. The dominant term is the page budget, so a build that lowers
 `NANDLOG_MAX_PAGE_SIZE_BYTES` to match a 2 KB-page part saves about 6 kB.
+
+The only meaningful stack use is in the epoch-listing calls, which build a
+`2 × NANDLOG_MAX_LISTED_EPOCHS` array of `uint32_t` — 128 bytes at the default of 16 — rather than keeping a
+list of epochs in RAM between calls. The ring on flash is the record; a copy in RAM would only be another
+thing to keep true.
 
 
 ## Failure, and what is done about it
@@ -719,26 +793,26 @@ step over it. Offload reports it as a zero-length page carrying its sequence num
 ## Versioning
 
 ```c
-#define NANDLOG_VERSION_MAJOR    1
-#define NANDLOG_VERSION_MINOR    1
+#define NANDLOG_VERSION_MAJOR    2
+#define NANDLOG_VERSION_MINOR    0
 ```
 
-The **major** number changes when an on-flash or wire structure changes shape. A consumer that has to care
-can refuse to build rather than discover it at runtime:
+The **major** number changes when anything a consumer built against has to be changed to keep working: a
+structure that moves on flash or on the wire, a function that is renamed or whose meaning shifts. A consumer
+that has to care can refuse to build rather than discover it at runtime:
 
 ```c
-#if (NANDLOG_VERSION_MAJOR != 1)
-#error "This application understands nandlog 1.x page and stream layouts only"
+#if (NANDLOG_VERSION_MAJOR != 2)
+#error "This application understands nandlog 2.x page and stream layouts only"
 #endif
 ```
 
-The **minor** number changes for anything else — added functions, policy knobs, chip drivers, behaviour that
-does not move a byte on the part. `NANDLOG_VERSION_AT_LEAST(major, minor)` is the test for a feature added
-in a minor release:
+The **minor** number changes for additions — new functions, new policy knobs, new chip drivers, behaviour
+that does not move a byte on the part and breaks no caller:
 
 ```c
-#if NANDLOG_VERSION_AT_LEAST(1, 1)
-   // nandlog_chip_copy_page() exists
+#if NANDLOG_VERSION_AT_LEAST(2, 0)
+   // nandlog_select_epoch() exists
 #endif
 ```
 
@@ -770,13 +844,28 @@ discontinuity naturally and cannot lose data. A test that passes without the cod
 test, and finding that out is what showed the bounded scan could never be made sound.
 
 Host tests do not replace on-device testing. They cannot say anything about the real part's timing, its ECC,
-or the board. What they cover is everything above the SPI wire, with faults that are impractical to stage on
+or the board. What they cover is everything above the wire, with faults that are impractical to stage on
 hardware.
+
+### On the device
+
+`tests/` holds three applications for the questions the simulator cannot answer — what the real part does
+with a command the simulator only pretends to implement, what its on-die ECC does to bytes the log wants to
+read or write, and how long any of it takes. Two of them gate code that has never run on silicon:
+
+| test | gates |
+|---|---|
+| `test_nandlog_partial_read.c` | column-addressed and short page reads |
+| `test_nandlog_page_copy.c` | `nandlog_chip_copy_page()` |
+| `test_nandlog_ecc_marker.c` | whether bad-block marking in the spare area is possible at all |
+
+All three work only in the top blocks of the reserve, which the log never places a page in. See
+[tests/README.md](tests/README.md) for how to build them and what each result means.
 
 
 ## Adding a part
 
-One `.c` file under `chips/`. State the geometry, include `nandlog_chip_common.h`, and implement eleven
+One `.c` file under `chips/`. State the geometry, include `nandlog_chip_common.h`, and implement twelve
 functions:
 
 ```c
@@ -789,10 +878,14 @@ functions:
 #include "nandlog_chip_common.h"
 ```
 
-The eleven are `geometry`, `probe`, `init`, `low_power`, `read_page`, `write_page`, `erase_block`,
-`copy_page`, `is_bad_block`, `mark_bad_block` and `reset_bad_blocks`. A part with no internal data move
-expands `NANDLOG_CHIP_NO_INTERNAL_PAGE_COPY` for the eighth. Read either supplied driver; both are complete
-on their own.
+The twelve are `geometry`, `probe`, `init`, `low_power`, `read_page`, `read_page_region`, `write_page`,
+`erase_block`, `copy_page`, `is_bad_block`, `mark_bad_block` and `reset_bad_blocks`. A part with no internal
+data move expands `NANDLOG_CHIP_NO_INTERNAL_PAGE_COPY` in place of `copy_page`. Read either supplied driver;
+both are complete on their own.
+
+`read_page_region` is the one that carries the most weight: the log reads far more 32-byte headers than whole
+pages, and a driver that implements it as "read the whole page and copy a slice" throws away the entire
+saving. It has to issue the part's column address.
 
 Geometry lives in the driver and nowhere else — not in a board header, not in the configuration file — so
 there is no second place for it to be wrong. `nandlog_chip_common.h` holds no command codes, no register

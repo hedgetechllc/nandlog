@@ -26,8 +26,8 @@
 #ifndef NANDLOG_ERASE_AHEAD_BLOCKS
 #error "nandlog_conf.h must define NANDLOG_ERASE_AHEAD_BLOCKS"
 #endif
-#ifndef NANDLOG_MAX_METADATA_BYTES
-#error "nandlog_conf.h must define NANDLOG_MAX_METADATA_BYTES"
+#ifndef NANDLOG_MAX_EPOCH_DETAILS_BYTES
+#error "nandlog_conf.h must define NANDLOG_MAX_EPOCH_DETAILS_BYTES"
 #endif
 #ifndef NANDLOG_TIMESTAMP_TOLERANCE_MS
 #error "nandlog_conf.h must define NANDLOG_TIMESTAMP_TOLERANCE_MS"
@@ -82,6 +82,10 @@ void nandlog_chip_low_power(bool sleep);
 
 // Read a whole page. False means the read reported an uncorrectable ECC error and the buffer is untrustworthy
 bool nandlog_chip_read_page(uint8_t *buffer, uint32_t page);
+
+// Read 'length' bytes of a page starting at 'offset'. Same return meaning as nandlog_chip_read_page(), which
+// is this function over the whole page.
+bool nandlog_chip_read_page_region(uint8_t *buffer, uint32_t page, uint32_t offset, uint32_t length);
 
 // Program a whole page, retrying up to NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL times. False means the chip
 // reported a program failure every time. Whether that block is then retired is the caller's decision

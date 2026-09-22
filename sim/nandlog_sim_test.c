@@ -30,10 +30,10 @@ static void fresh_log(void)
       printf("  FATAL: nandlog_init() failed\n");
       exit(1);
    }
-   nandlog_enter_maintenance_mode();
+   nandlog_begin_session();
    const uint8_t metadata[16] = "sim-metadata";
-   nandlog_store_metadata(metadata, sizeof(metadata));
-   nandlog_exit_maintenance_mode();
+   nandlog_begin_epoch(metadata, sizeof(metadata));
+   nandlog_end_session();
 }
 
 static void write_records(uint32_t count, uint32_t first_timestamp)
@@ -50,7 +50,7 @@ static void write_records(uint32_t count, uint32_t first_timestamp)
 static uint32_t read_all_pages(void)
 {
    uint32_t pages = 0, total = 0;
-   nandlog_enter_maintenance_mode();
+   nandlog_begin_session();
    nandlog_begin_reading(0, 0);
    nandlog_read_span(&pages, &total);
    uint32_t seen = 0, bytes = 0;
@@ -62,7 +62,7 @@ static uint32_t read_all_pages(void)
          { ++seen; bytes += length; }
    }
    nandlog_end_reading();
-   nandlog_exit_maintenance_mode();
+   nandlog_end_session();
    CHECK(total == bytes, "byte total %u disagrees with what the pages delivered, %u", total, bytes);
    return seen;
 }
@@ -158,7 +158,7 @@ static void test_framed_records_walk_back(void)
 
    // Walk every page the way a reader with no knowledge of the application would
    uint32_t pages = 0, walked = 0;
-   nandlog_enter_maintenance_mode();
+   nandlog_begin_session();
    nandlog_begin_reading(0, 0);
    nandlog_read_span(&pages, NULL);
    for (uint32_t i = 0; i < pages; ++i)
@@ -184,7 +184,7 @@ static void test_framed_records_walk_back(void)
             i, in_page, header.record_count);
    }
    nandlog_end_reading();
-   nandlog_exit_maintenance_mode();
+   nandlog_end_session();
    CHECK(walked == written, "wrote %u records, walked %u back", written, walked);
    nandlog_deinit();
 }
@@ -196,9 +196,9 @@ static void test_metadata_survives(void)
    printf("Metadata round trip\n");
    fresh_log();
    uint8_t blob[16];
-   nandlog_enter_maintenance_mode();
-   nandlog_retrieve_metadata(blob, sizeof(blob));
-   nandlog_exit_maintenance_mode();
+   nandlog_begin_session();
+   nandlog_retrieve_epoch_details(blob, sizeof(blob));
+   nandlog_end_session();
    CHECK(memcmp(blob, "sim-metadata", 12) == 0, "metadata came back as '%s'", blob);
    nandlog_deinit();
 }
@@ -222,6 +222,33 @@ static void test_reboot_recovery(void)
    nandlog_deinit();
 }
 
+static void test_a_factory_marked_block_is_found_in_the_spare_area(void)
+{
+   printf("A factory bad-block marker is read out of the spare area\n");
+   nandlog_sim_create(DEVICE_ID, sizeof(DEVICE_ID));
+
+   // Mark block 12 the way a manufacturer does: a non-0xFF byte at the first byte of the spare area of the
+   // block's first page, with the main array left erased. A read that starts at column zero cannot see this
+   // without dragging the whole page along behind it, so this is what exercises the column-addressed read
+   const uint32_t page_size = nandlog_chip_geometry()->page_size_bytes;
+   const uint32_t pages_per_block = nandlog_chip_geometry()->pages_per_block;
+   const uint32_t marked_page = 12 * pages_per_block;
+   uint8_t *raw = nandlog_sim_raw_page(marked_page);
+   CHECK(raw != NULL, "the simulator would not hand back block 12's first page");
+   if (raw)
+      raw[page_size] = 0x00;
+
+   CHECK(nandlog_init(), "init failed with a factory-marked block present");
+   CHECK(nandlog_chip_is_bad_block(marked_page), "the factory-marked block was not retired at first boot");
+   CHECK(!nandlog_chip_is_bad_block(marked_page + pages_per_block), "a block with no marker was retired anyway");
+
+   // And it still holds after a reboot, which is the persisted table doing its job
+   nandlog_deinit();
+   CHECK(nandlog_init(), "re-init failed");
+   CHECK(nandlog_chip_is_bad_block(marked_page), "the factory-marked block was forgotten across a reboot");
+   nandlog_deinit();
+}
+
 static void test_bad_block_is_skipped(void)
 {
    printf("A block that will not erase is retired\n");
@@ -235,10 +262,10 @@ static void test_bad_block_is_skipped(void)
    nandlog_sim_set_faults(&faults);
 
    CHECK(nandlog_init(), "init failed with bad blocks present");
-   nandlog_enter_maintenance_mode();
+   nandlog_begin_session();
    const uint8_t metadata[16] = "sim-metadata";
-   nandlog_store_metadata(metadata, sizeof(metadata));
-   nandlog_exit_maintenance_mode();
+   nandlog_begin_epoch(metadata, sizeof(metadata));
+   nandlog_end_session();
    write_records(300, 1000);
    const uint32_t pages = read_all_pages();
    CHECK(pages > 0, "no pages readable with two dead blocks");
@@ -282,6 +309,67 @@ static void test_relocating_a_block_does_not_move_pages_across_the_bus(void)
    CHECK(traffic > (2 * relocated_bytes), "the read-and-write path moved only %u bytes to relocate %u bytes of pages, so it cannot have read and written each one", traffic, relocated_bytes);
 #endif
    printf("  %u bytes of bus traffic to relocate %u bytes of pages\n", traffic, relocated_bytes);
+   nandlog_deinit();
+}
+
+static void test_an_earlier_epoch_can_be_listed_and_read(void)
+{
+   printf("An earlier epoch is listed, selected, and read back\n");
+   fresh_log();                        // epoch 1
+   write_records(30, 1000);            // ten pages
+   const uint32_t epoch_one_pages = read_all_pages();
+   CHECK(epoch_one_pages == 10, "expected ten pages in the first epoch, got %u", epoch_one_pages);
+
+   // Begin a second epoch and put a different amount of data in it
+   nandlog_begin_session();
+   const uint8_t details[16] = "epoch-two";
+   CHECK(nandlog_begin_epoch(details, sizeof(details)), "beginning a second epoch failed");
+   nandlog_end_session();
+   write_records(15, 500000);
+   CHECK(read_all_pages() == 5, "expected five pages in the second epoch");
+
+   nandlog_begin_session();
+
+   // Both epochs are still named by the ring, newest first
+   CHECK(nandlog_epoch_count() == 2, "the ring should describe two epochs, it describes %u", nandlog_epoch_count());
+   nandlog_epoch_info_t newest, older;
+   CHECK(nandlog_epoch_info(0, &newest), "epoch 0 was not described");
+   CHECK(nandlog_epoch_info(1, &older), "epoch 1 was not described");
+   CHECK(newest.is_current, "index 0 is not the current epoch");
+   CHECK(!older.is_current, "index 1 claims to be the current epoch");
+   CHECK(newest.epoch > older.epoch, "the listing is not newest-first (%u then %u)", newest.epoch, older.epoch);
+   CHECK(!nandlog_epoch_info(2, &newest), "a third epoch was described out of nowhere");
+
+   // Select the older one and read it back. Nothing has swept over it yet, so all ten pages are still there
+   CHECK(nandlog_select_epoch(older.epoch), "selecting the earlier epoch failed");
+   uint32_t pages = 0, bytes = 0, seen = 0;
+   nandlog_begin_reading(0, 0);
+   nandlog_read_span(&pages, &bytes);
+   for (uint32_t i = 0; i < pages; ++i)
+   {
+      nandlog_page_header_t header;
+      if (nandlog_retrieve_next_page(readback, &header))
+      {
+         ++seen;
+         CHECK(header.epoch == older.epoch, "a page of epoch %u turned up while reading epoch %u",
+               header.epoch, older.epoch);
+      }
+   }
+   nandlog_end_reading();
+   CHECK(seen == epoch_one_pages, "reading the earlier epoch gave %u of its %u pages", seen, epoch_one_pages);
+
+   // Writing is refused while it is selected, so a download cannot be mistaken for somewhere to put data
+   const uint32_t before = seen;
+   write_records(3, 900000);
+   nandlog_select_current_epoch();
+   nandlog_end_session();
+   CHECK(read_all_pages() == 5, "a record was stored while an earlier epoch was selected");
+   (void)before;
+
+   // And selecting an epoch that was never written fails rather than reading something else
+   nandlog_begin_session();
+   CHECK(!nandlog_select_epoch(9999), "selecting an epoch that does not exist succeeded");
+   nandlog_end_session();
    nandlog_deinit();
 }
 
@@ -345,7 +433,7 @@ static void test_disabled_log_drops_records(void)
 
 static void test_reads_refuse_outside_a_session(void)
 {
-   printf("Reading outside a maintenance session yields nothing\n");
+   printf("Reading outside a session yields nothing\n");
    fresh_log();
    write_records(16, 1000);
    nandlog_begin_reading(0, 0);
@@ -394,7 +482,7 @@ static void test_date_limited_read_spans_a_time_discontinuity(void)
    const uint32_t regression_ms = 17210;          // the largest step seen in the field, to the millisecond
    const uint32_t records_per_run = 600;
    fresh_log();
-   nandlog_exit_maintenance_mode();
+   nandlog_end_session();
 
    for (uint32_t i = 0; i < records_per_run; ++i)
    {
@@ -414,7 +502,7 @@ static void test_date_limited_read_spans_a_time_discontinuity(void)
 
    // A bound only the FIRST run ever reached
    const uint32_t target = high_water - (regression_ms / 4);
-   nandlog_enter_maintenance_mode();
+   nandlog_begin_session();
    nandlog_begin_reading(target, 0);
    uint32_t pages = 0, bytes = 0;
    nandlog_read_span(&pages, &bytes);
@@ -430,7 +518,7 @@ static void test_date_limited_read_spans_a_time_discontinuity(void)
       }
    }
    nandlog_end_reading();
-   nandlog_exit_maintenance_mode();
+   nandlog_end_session();
 
    CHECK(delivered > 0, "a date-limited read starting across a backward time step returned no pages at all");
    CHECK(reached > 0, "no delivered page reached the requested start bound of %u -- the qualifying data sits before the discontinuity and the seek skipped past it", target);
@@ -448,8 +536,10 @@ int main(void)
    test_framed_records_walk_back();
 #endif
    test_reboot_recovery();
+   test_a_factory_marked_block_is_found_in_the_spare_area();
    test_bad_block_is_skipped();
    test_relocating_a_block_does_not_move_pages_across_the_bus();
+   test_an_earlier_epoch_can_be_listed_and_read();
    test_torn_page_is_rejected();
    test_corrupt_page_is_rejected();
    test_disabled_log_drops_records();
