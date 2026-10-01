@@ -18,6 +18,17 @@
 static uint8_t whole_page[NANDLOG_MAX_PAGE_SIZE_BYTES + NANDLOG_MAX_SPARE_SIZE_BYTES];
 static uint8_t region[NANDLOG_MAX_PAGE_SIZE_BYTES];
 
+// A minimal command layer for 1f only, so the cost of a page read can be decomposed into the pieces the
+// driver composes it from. Alliance AS5F18G04SND opcodes; change these for another part
+#define CMD_READ_STATUS_REGISTER                    0x0F
+#define CMD_WRITE_STATUS_REGISTER                   0x1F
+#define CMD_PAGE_DATA_READ                          0x13
+#define CMD_READ                                    0x03
+#define SR2                                         0xB0
+#define SR3                                         0xC0
+#define SR_BUSY                                     0b00000001
+#define SR2_ECC_ENABLE                              0b00010000
+
 #define PAGE_BYTES     (nandlog_chip_geometry()->page_size_bytes)
 #define SPARE_BYTES    (nandlog_chip_geometry()->spare_size_bytes)
 #define PAGES_PER_BLK  (nandlog_chip_geometry()->pages_per_block)
@@ -29,6 +40,7 @@ static uint8_t region[NANDLOG_MAX_PAGE_SIZE_BYTES];
 static void test_short_read_agrees_with_whole_page(void)
 {
    print("\n--- 1a: a short read returns the same bytes as a whole-page read ---\n");
+   hw_power_up();
 
    // Put something on a scratch page that is neither erased nor constant, so a read from the wrong place
    // cannot coincidentally agree
@@ -55,6 +67,7 @@ static void test_short_read_agrees_with_whole_page(void)
 static void test_column_addressing(void)
 {
    print("\n--- 1b: a read from a non-zero column lands at that column ---\n");
+   hw_power_up();
    const uint32_t page = hw_scratch_page(0);
 
    HW_CHECK(nandlog_chip_read_page(whole_page, page), "whole-page read reported an ECC failure");
@@ -94,6 +107,7 @@ static void test_spare_area_marker_agrees(void)
 {
    print("\n--- 1c: the spare-area marker reads the same via a long read and via its column ---\n");
    print("     (this is the one that decides whether the bad-block scan can be trusted)\n");
+   hw_power_up();
 
    uint32_t mismatches = 0, factory_bad = 0, unreadable = 0, scanned = 0;
    const uint32_t start = hw_cycle_count();
@@ -147,6 +161,7 @@ static void test_page_header_only_read(void)
 {
    print("\n--- 1d: a page header reads correctly without the page behind it ---\n");
 
+   // These go through nandlog.h, which manages the part's power for itself
    // Commit a real log page, then read only its header the way every boot and every bounded download now do
    nandlog_disable(false);
    hw_fill_pattern(region, 512, 0x5EED1234);
@@ -170,14 +185,122 @@ static void test_page_header_only_read(void)
    // recover_write_head(), both of which are now header-only reads
    nandlog_deinit();
    HW_CHECK(nandlog_init(), "re-initialising after a header-only boot path failed");
-   nandlog_begin_session();
+   hw_power_up();
    uint32_t pages = 0;
    nandlog_begin_reading(0, 0);
    nandlog_read_span(&pages, NULL);
    nandlog_end_reading();
-   nandlog_end_session();
    HW_CHECK(pages > 0, "the write head was not recovered -- the log reads as empty after a re-init");
    print("  write head recovered, %u pages in the epoch\n", pages);
+}
+
+
+// Test 1f -- where the fixed cost of a page read actually goes --------------------------------------------------------
+//
+// 1e shows that a 32-byte header read costs a large fraction of a whole-page read, which means the cost is
+// dominated by something that does not scale with length. This decomposes it, because which piece dominates
+// decides whether the next optimisation belongs in the port, the driver, or neither
+
+static uint8_t probe_register(uint8_t which)
+{
+   uint8_t value = 0;
+   nandlog_port_transfer_read(CMD_READ_STATUS_REGISTER, &which, 1, &value, 1);
+   return value;
+}
+
+static void probe_write_register(uint8_t which, uint8_t value)
+{
+   nandlog_port_transfer_write(CMD_WRITE_STATUS_REGISTER, &which, 1, &value, 1);
+}
+
+// Smallest delay after a page-read command at which the part reports it is no longer busy. Bisected with a
+// single status read, so the answer is not quantised by the ~32 us a status read costs
+static uint32_t bisect_busy_time(uint32_t page)
+{
+   const uint8_t address[3] = { (uint8_t)(page >> 16), (uint8_t)(page >> 8), (uint8_t)page };
+   uint32_t low = 0, high = 2000;
+   while (low < high)
+   {
+      const uint32_t mid = low + ((high - low) / 2);
+      nandlog_port_transfer_write(CMD_PAGE_DATA_READ, NULL, 0, address, sizeof(address));
+      am_hal_delay_us(mid);
+      const bool still_busy = (probe_register(SR3) & SR_BUSY) != 0;
+      while (probe_register(SR3) & SR_BUSY)      // let it settle before the next probe
+         ;
+      if (still_busy)
+         low = mid + 1;
+      else
+         high = mid;
+   }
+   return low;
+}
+
+static void test_where_the_time_goes(void)
+{
+   print("\n--- 1f: decomposing the fixed cost of a page read ---\n");
+   hw_power_up();
+   const uint32_t page = hw_scratch_page(0);
+   const uint32_t rounds = 64;
+   uint8_t page_address[3] = { (uint8_t)(page >> 16), (uint8_t)(page >> 8), (uint8_t)page };
+   const uint8_t column_zero[3] = { 0, 0, 0 };
+
+   // (a) the smallest thing the port can do: one status-register read
+   uint32_t t0 = hw_cycle_count();
+   for (uint32_t i = 0; i < rounds; ++i)
+      (void)probe_register(SR3);
+   const uint32_t register_us = hw_elapsed_us(t0, hw_cycle_count()) * 1000 / rounds;
+
+   // (b) latching a page into the cache register, and polling until the part says it is done
+   uint32_t polls_total = 0;
+   t0 = hw_cycle_count();
+   for (uint32_t i = 0; i < rounds; ++i)
+   {
+      nandlog_port_transfer_write(CMD_PAGE_DATA_READ, NULL, 0, page_address, sizeof(page_address));
+      while (probe_register(SR3) & SR_BUSY)
+         ++polls_total;
+   }
+   const uint32_t latch_us = hw_elapsed_us(t0, hw_cycle_count()) * 1000 / rounds;
+
+   // (c) clocking bytes out of a register that is already loaded
+   t0 = hw_cycle_count();
+   for (uint32_t i = 0; i < rounds; ++i)
+      nandlog_port_transfer_read(CMD_READ, column_zero, sizeof(column_zero), region, sizeof(nandlog_page_header_t));
+   const uint32_t header_out_us = hw_elapsed_us(t0, hw_cycle_count()) * 1000 / rounds;
+
+   t0 = hw_cycle_count();
+   for (uint32_t i = 0; i < rounds; ++i)
+      nandlog_port_transfer_read(CMD_READ, column_zero, sizeof(column_zero), whole_page, PAGE_BYTES);
+   const uint32_t page_out_us = hw_elapsed_us(t0, hw_cycle_count()) * 1000 / rounds;
+
+   print("  (a) one status-register read        : %u.%03u us\n", register_us / 1000, register_us % 1000);
+   print("  (b) latch a page + poll until ready : %u.%03u us   (%u.%02u polls each)\n",
+         latch_us / 1000, latch_us % 1000, polls_total / rounds, (100 * polls_total / rounds) % 100);
+   print("  (c) clock out 32 bytes              : %u.%03u us\n", header_out_us / 1000, header_out_us % 1000);
+   print("  (d) clock out a whole page          : %u.%03u us\n", page_out_us / 1000, page_out_us % 1000);
+   // (e) the part's busy time, isolated. The datasheet's ONFI parameter page gives tR maximum as 140 us
+   // for a 4096-byte page, and the first measurement of this came back at 345 us -- 2.5x the stated
+   // maximum. These three cases are an attempt to find out why: on-die ECC is the obvious suspect, and an
+   // erased page is the other, because its parity bytes are all 0xFF and the engine may work hardest
+   // before giving up on a page that was never written
+   const uint8_t saved_sr2 = probe_register(SR2);
+   const uint32_t erased_page = hw_scratch_page(3);
+   nandlog_chip_erase_block(erased_page);
+
+   const uint32_t busy_ecc_on       = bisect_busy_time(page);
+   const uint32_t busy_ecc_on_blank = bisect_busy_time(erased_page);
+   probe_write_register(SR2, (uint8_t)(saved_sr2 & ~SR2_ECC_ENABLE));
+   const uint32_t busy_ecc_off      = bisect_busy_time(page);
+   probe_write_register(SR2, saved_sr2);
+
+   print("  (e) busy time, ECC on, written page  : %u us\n", busy_ecc_on);
+   print("      busy time, ECC OFF, written page : %u us\n", busy_ecc_off);
+   print("      busy time, ECC on, ERASED page   : %u us\n", busy_ecc_on_blank);
+   print("      SR2 restored to %02X %s\n", probe_register(SR2), (probe_register(SR2) == saved_sr2) ? "" : "(MISMATCH)");
+
+   print("\n  The datasheet gives tR maximum as 140 us for a 4096-byte page. A page read is that plus\n"
+         "  one command and one data transfer; everything else is driver book-keeping. If the ECC-off\n"
+         "  figure is near 140 and the ECC-on figure is not, the gap is the on-die ECC engine and the\n"
+         "  datasheet's number excludes it. If both are high, the part is slower than its own spec.\n");
 }
 
 
@@ -192,6 +315,7 @@ static void test_boot_timing(void)
    const bool ok = nandlog_init();
    const uint32_t warm_boot_us = hw_elapsed_us(start, hw_cycle_count());
    HW_CHECK(ok, "nandlog_init() failed while being timed");
+   hw_power_up();                   // the init just timed left the part asleep again
 
    // One latch plus a 32-byte read, and one latch plus a whole page, so the ratio of the two says how much
    // of a read is the flash and how much is the bus
@@ -227,6 +351,7 @@ int main(void)
          am_hal_delay_us(1000000);
    }
    system_enable_interrupts(true);
+   hw_power_up();
 
    print("\n============================================================\n");
    print("nandlog on-device test 1: partial and column-addressed reads\n");
@@ -239,7 +364,9 @@ int main(void)
    test_spare_area_marker_agrees();
    test_page_header_only_read();
    test_boot_timing();
+   test_where_the_time_goes();
 
+   hw_power_down();
    HW_REPORT("TEST 1: PARTIAL READS");
    print("\nIf 1b or 1c failed, do not deploy: the bad-block scan is reading the wrong place\n"
          "and will silently fail to retire factory-bad blocks.\n");

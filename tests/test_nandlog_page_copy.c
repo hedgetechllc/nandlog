@@ -13,8 +13,9 @@
 //      byte, the destination would then look factory-bad and a later scan would retire a perfectly good
 //      block. 2b catches this, and it is the subtle one.
 //
-// WHAT TO REPORT BACK: the PASS/FAIL line and the timing table. If you can, power-cycle and run it again;
-// it checks the previous run's copy on startup before erasing anything.
+// WHAT TO REPORT BACK: the PASS/FAIL line and the timing table. Then power-cycle and run it again. RE-FLASHING
+// BETWEEN THE TWO RUNS IS FINE: flashing rewrites the MCU, not the NAND, and the check below runs before
+// anything on the part is erased.
 
 #include <string.h>
 #include "nandlog_hw_test.h"
@@ -32,6 +33,7 @@ static uint8_t verify_buffer[NANDLOG_MAX_PAGE_SIZE_BYTES + NANDLOG_MAX_SPARE_SIZ
 static void test_a_copied_page_is_the_source_page(void)
 {
    print("\n--- 2a: a copied page arrives intact and reads back clean ---\n");
+   hw_power_up();
    const uint32_t source = hw_scratch_page(0), destination = hw_scratch_page(1);
 
    HW_CHECK(nandlog_chip_erase_block(source), "could not erase the source block");
@@ -84,6 +86,7 @@ static void test_a_copy_does_not_carry_the_spare_area(void)
 {
    print("\n--- 2b: a copy does not drag the source's spare area to the destination ---\n");
    print("     (a stray non-0xFF byte here would make a good block look factory-bad)\n");
+   hw_power_up();
 
    const uint32_t destination = hw_scratch_page(1);
    uint8_t marker = 0x00;
@@ -104,6 +107,7 @@ static void test_a_copy_does_not_carry_the_spare_area(void)
 static void test_copying_a_run_of_pages(void)
 {
    print("\n--- 2c: a run of pages, including an erased one ---\n");
+   hw_power_up();
    const uint32_t source = hw_scratch_page(0), destination = hw_scratch_page(1);
    const uint32_t pages_per_block = nandlog_chip_geometry()->pages_per_block;
    const uint32_t run = (pages_per_block < 8) ? pages_per_block : 8;
@@ -146,6 +150,7 @@ static void test_copying_a_run_of_pages(void)
 static void test_copy_timing(void)
 {
    print("\n--- 2d: what the internal copy costs against a read and a write ---\n");
+   hw_power_up();
    const uint32_t source = hw_scratch_page(0), destination = hw_scratch_page(2);
    const uint32_t rounds = 8;
 
@@ -189,6 +194,7 @@ static void test_copy_timing(void)
 
 static void check_previous_run_survived(void)
 {
+   hw_power_up();
    // Run before anything is erased. On a first run the destination is erased or holds something else, which
    // is not a failure; on a second run after a power cycle it must still hold what the first run copied
    const uint32_t destination = hw_scratch_page(1);
@@ -196,7 +202,8 @@ static void check_previous_run_survived(void)
       print("\nPREVIOUS RUN: the page copied before the last power cycle is still correct [PASSED]\n");
    else
       print("\nPREVIOUS RUN: nothing to check (first run, or the last run did not get that far)\n"
-            "              Power-cycle and run this test again to check that a copy survives.\n");
+            "              Power-cycle, then re-flash and run again -- flashing rewrites the MCU, not\n"
+            "              the NAND, and this check runs before anything on the part is erased.\n");
 }
 
 
@@ -211,6 +218,7 @@ int main(void)
          am_hal_delay_us(1000000);
    }
    system_enable_interrupts(true);
+   hw_power_up();                   // every test below calls nandlog_chip_* directly
 
    print("\n============================================================\n");
    print("nandlog on-device test 2: chip-internal page copy\n");
@@ -226,11 +234,13 @@ int main(void)
    test_copying_a_run_of_pages();
    test_copy_timing();
 
+   hw_power_down();
    HW_REPORT("TEST 2: INTERNAL PAGE COPY");
    print("\nIf 2a failed, set NANDLOG_CHIP_PAGE_COPY to 0 in nandlog_conf.h before deploying.\n"
          "If only 2b failed, the copy works but carries the spare area -- tell me, because the\n"
          "driver then has to clear the destination's marker byte after every relocation.\n");
-   print("\nNow power-cycle the board and run this same test again to check that a copied page survives.\n");
+   print("\nNow power-cycle the board, then re-flash and run this test again. Re-flashing does not\n"
+         "disturb the NAND, and the check at the top runs before anything is erased.\n");
 
    while (true)
       am_hal_delay_us(1000000);
