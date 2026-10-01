@@ -45,6 +45,11 @@
 
 // Nandlog Chip Type Definitions ---------------------------------------------------------------------------------------
 
+// NOTE: Every function below that touches the bus assumes the port is already awake and the part is out of
+// its low-power state. The log core guarantees that for itself. It wakes both around each operation and
+// puts them back afterwards, or holds them awake for the length of a session, and nandlog_init()
+// deliberately leaves them asleep when it returns.
+
 // What the part is, as reported by the driver that knows. Valid at any time, including before
 // nandlog_chip_init(), because these are properties of the silicon rather than of its state
 typedef struct
