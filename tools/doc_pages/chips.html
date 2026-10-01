@@ -1,0 +1,239 @@
+<!-- title: Chip Drivers | desc: How to add support for a SPI NAND part that nandlog does not already have a driver for. One .c file, twelve functions. -->
+    <h1>Chip Drivers</h1>
+    <p class="lede">One <code>.c</code> file per part. Twelve functions.</p>
+
+    <p>Two drivers are supplied and each is complete on its own &mdash; <code>nandlog_chip_common.h</code>
+       holds no command codes, no register numbers and no bit patterns, and there is no shared
+       implementation beneath it. Copy whichever is closer to your part and work from the datasheet.</p>
+
+    <h2>1. Declare the geometry</h2>
+
+    <p>Six macros, then the common header. Geometry lives in the driver and nowhere else &mdash; not in a
+       board header, not in the configuration file.</p>
+
+<pre><code>/* chips/nandlog_chip_MYPART.c */
+
+#define NANDLOG_CHIP_NAME                    "MYPART"
+#define NANDLOG_CHIP_PAGE_SIZE_BYTES         4096   /* main array, excluding spare  */
+#define NANDLOG_CHIP_SPARE_SIZE_BYTES        256    /* spare/ECC bytes that follow  */
+#define NANDLOG_CHIP_PAGES_PER_BLOCK         64     /* MUST be a power of two       */
+#define NANDLOG_CHIP_BLOCK_COUNT             4096
+#define NANDLOG_CHIP_RESERVED_BLOCKS         80     /* held back for bad blocks     */
+
+#include "nandlog_chip_common.h"</code></pre>
+
+    <p>The common header checks the set is complete, asserts the page fits
+       <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code>, and derives the addressing that follows:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Derived</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td><code>NANDLOG_CHIP_PAGE_COUNT</code></td><td>pages in the whole array</td></tr>
+        <tr><td><code>NANDLOG_CHIP_PAGE_WITH_SPARE_SIZE_BYTES</code></td><td>page + spare</td></tr>
+        <tr><td><code>NANDLOG_CHIP_BLOCK_MASK</code></td><td>mask a page address to its block</td></tr>
+        <tr><td><code>NANDLOG_CHIP_RESERVED_BASE_PAGE</code></td><td>first page of the reserve</td></tr>
+        <tr><td><code>NANDLOG_BUSY_TIMEOUT_POLLS</code></td><td>poll count from the configured timeout</td></tr>
+        <tr><td><code>NANDLOG_CHIP_GEOMETRY_INITIALIZER</code></td><td>fills a <code>nandlog_geometry_t</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>How many blocks to reserve is a judgement call. It must cover the factory bad blocks (typically up to
+       2% of the array) plus whatever the part accumulates in service, plus somewhere to persist a bad-block
+       table if your part has no hardware remapping. The supplied drivers reserve 80 of 4096 and 40 of 1024.</p>
+
+    <h2>2. Implement twelve functions</h2>
+
+    <div class="note">
+      <p><strong>Power contract.</strong> Every function below that touches the bus may assume the port is
+         awake and the part is out of its low-power state. The log core guarantees that &mdash; it wakes both
+         around each operation and puts them back afterwards, or holds them awake for the length of a
+         session.</p>
+      <p>The corollary matters when you write a bench test for your driver: <code>nandlog_init()</code>
+         deliberately leaves both asleep when it returns, so code that calls these functions directly must
+         open a session first. On a peripheral that is merely unclocked rather than absent, the failure is a
+         bus fault, not an error return. <code>nandlog_chip_geometry()</code> and
+         <code>nandlog_chip_is_bad_block()</code> are the exceptions: both answer from RAM.</p>
+    </div>
+
+    <h3>Identity and setup</h3>
+
+    <div class="fn">
+      <pre>const nandlog_geometry_t *nandlog_chip_geometry(void);</pre>
+      <p>Return the geometry. Valid at any time, including before <code>nandlog_chip_init()</code>, because
+         these are properties of the silicon rather than of its state.</p>
+<pre><code>const nandlog_geometry_t *nandlog_chip_geometry(void)
+{
+   static const nandlog_geometry_t geometry = NANDLOG_CHIP_GEOMETRY_INITIALIZER;
+   return &amp;geometry;
+}</code></pre>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_probe(void);</pre>
+      <p>Confirm the part is present and answering, typically by reading its device ID and retrying for a
+         bounded time. Safe to call before <code>nandlog_chip_init()</code>.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_chip_init(void);</pre>
+      <p>Configure the part's status registers, then load the persisted bad-block table or, on a first boot,
+         build one from the factory markers and persist it. Called once, after a successful probe.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_chip_low_power(bool sleep);</pre>
+      <p>Enter or leave the part's lowest-power state. May be empty if the part has no deep-power-down
+         command worth the wake-up latency.</p>
+    </div>
+
+    <h3>Data</h3>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_read_page(uint8_t *buffer, uint32_t page);</pre>
+      <p>Read a whole page. <strong>Returns false</strong> if the read reported an uncorrectable ECC error
+         and the buffer is untrustworthy.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_read_page_region(uint8_t *buffer, uint32_t page,
+                                   uint32_t offset, uint32_t length);</pre>
+      <p>Read <code>length</code> bytes starting at <code>offset</code> within the page. Same return meaning.</p>
+      <div class="warn">
+        <p><strong>This one carries the most weight.</strong> The log reads far more 32-byte headers than
+           whole pages, and a driver that implements this as "read the whole page and copy a slice" throws
+           away the entire saving. It must issue the part's column address. On a full epoch of a 4 KB-page
+           part that is the difference between 8&nbsp;MB and 1&nbsp;GB of bus traffic for a single bounded
+           download.</p>
+      </div>
+      <p>Reading less than a page is safe on any part with on-die ECC: correction happens when the page is
+         latched into the cache register, so the error status is settled before a byte is clocked out and
+         cannot depend on how much of that register the host then looks at.</p>
+<pre><code>static bool read_page_region(uint8_t *buffer, uint32_t page, uint32_t column, uint32_t length)
+{
+   /* 16-bit column address, most significant byte first, then a dummy byte */
+   const uint8_t column_address[3] = { (uint8_t)(column &gt;&gt; 8), (uint8_t)column, 0x00 };
+   uint8_t page_address[3];
+   split_page_address(page, page_address);
+
+   wait_until_not_busy();
+   nandlog_port_transfer_write(COMMAND_PAGE_DATA_READ, NULL, 0, page_address, sizeof(page_address));
+   wait_until_not_busy();
+   nandlog_port_transfer_read(COMMAND_READ, column_address, sizeof(column_address), buffer, length);
+   wait_until_not_busy();
+   return (read_register(STATUS_REGISTER_3) &amp; STATUS_PAGE_FATAL_ERROR) != STATUS_PAGE_FATAL_ERROR;
+}</code></pre>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_write_page(const uint8_t *data, uint32_t page);</pre>
+      <p>Program a whole page, retrying up to <code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code> times.
+         Returns false if the part reported a program failure every time. Whether the block is then retired
+         is the caller's decision. Open and close write protection for yourself.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_erase_block(uint32_t page);</pre>
+      <p>Erase the block containing <code>page</code>. False means the part reported an erase failure.</p>
+    </div>
+
+    <div class="fn">
+      <pre>nandlog_copy_result_t nandlog_chip_copy_page(uint32_t source_page, uint32_t destination_page);</pre>
+      <p>Relocate one page to another inside the chip. Most SPI NAND can latch a page into its own cache
+         register and program it straight back out to a different address, so a page that is only being
+         moved never crosses the bus &mdash; on a 4&nbsp;KB part that is 8&nbsp;KB of traffic saved per
+         relocated page.</p>
+      <p>Return one of:</p>
+      <div class="tablewrap">
+      <table>
+        <thead><tr><th>Value</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>NANDLOG_COPY_OK</code></td><td>The part did it.</td></tr>
+          <tr><td><code>NANDLOG_COPY_FAILED</code></td><td>The part tried and reported a program failure, so the destination block is suspect.</td></tr>
+          <tr><td><code>NANDLOG_COPY_UNSUPPORTED</code></td><td>No such command. The caller falls back to a read and a write.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>A part with no internal data-move command expands a macro instead of writing this out:</p>
+<pre><code>NANDLOG_CHIP_NO_INTERNAL_PAGE_COPY</code></pre>
+      <p>The implementation is a page read followed by a program execute, with <strong>no program data load
+         between them</strong> &mdash; that is the whole point:</p>
+<pre><code>wait_until_not_busy();
+nandlog_port_transfer_write(COMMAND_PAGE_DATA_READ, NULL, 0, source_address, 3);
+wait_until_not_busy();
+nandlog_port_transfer_write(COMMAND_WRITE_ENABLE, NULL, 0, NULL, 0);
+nandlog_port_transfer_write(COMMAND_PROGRAM_EXECUTE, NULL, 0, destination_address, 3);
+wait_until_not_busy();</code></pre>
+      <div class="note">
+        <p>An uncorrectable source page is not a failure here. Its uncorrected bytes are what lands at the
+           destination, which reads back with sound ECC and a payload CRC that will not match &mdash; a gap,
+           which is exactly what reading it into RAM and finding it unreadable would have produced.</p>
+      </div>
+    </div>
+
+    <h3>Bad blocks</h3>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_is_bad_block(uint32_t page);</pre>
+      <p>Whether the block containing <code>page</code> is known bad.</p>
+      <div class="warn">
+        <p><strong>This must not touch flash.</strong> The log calls it once per page on the write path and
+           once per page in the epoch when a bounded download opens. Answer from a table or bitmap in RAM,
+           built during <code>nandlog_chip_init()</code>.</p>
+      </div>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_chip_mark_bad_block(uint32_t page);</pre>
+      <p>Retire the block. Make this idempotent &mdash; retiring a block that is already retired must not
+         consume a second table slot or a second spare block.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_reset_bad_blocks(void);</pre>
+      <p>Recovery utility. Discard the persisted table so it is rebuilt on the next boot. Return whether the
+         table was <em>verified</em> gone afterwards, rather than assuming the erase took. A part that
+         remaps in hardware cannot forget; say so through <code>nandlog_port_log()</code> and return true.</p>
+    </div>
+
+    <h2>3. Two strategies for bad blocks</h2>
+
+    <p>The supplied drivers take opposite approaches, which is the point of putting this behind the chip
+       seam.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th></th><th>Software table</th><th>Hardware LUT</th></tr></thead>
+      <tbody>
+        <tr><td>Example</td><td><code>AS5F18G04SND</code></td><td><code>W25N01GWZEIG</code></td></tr>
+        <tr><td>Where it lives</td><td>A marker page in the reserve, mirrored in RAM</td><td>The chip's own 20-entry remapping table</td></tr>
+        <tr><td>First boot</td><td>Scan every block's spare-area marker, build the table, persist it</td><td>Read the chip's LUT; scan for factory markers once</td></tr>
+        <tr><td>Later boots</td><td>Find and load the marker page</td><td>Read the chip's LUT</td></tr>
+        <tr><td>Reset</td><td>Erase the reserve, verify no marker survives</td><td>Not possible &mdash; entries are one-way</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>4. Test it</h2>
+
+    <p>Point the host simulator at your driver by editing the <code>SRC</code> line in
+       <code>sim/Makefile</code>, then:</p>
+
+<pre><code>cd sim &amp;&amp; make</code></pre>
+
+    <p>The simulator emulates a NAND part at the SPI command level, so your driver runs on it unmodified
+       &mdash; addressing, status-register handshakes, busy-waiting and bad-block bookkeeping are all
+       exercised. It builds the emulated part from whatever geometry your driver reports, so the two cannot
+       disagree.</p>
+
+    <p>Then run the three <a href="testing.html">on-device tests</a>. Those cover what the simulator cannot:
+       whether your column addressing is right on real silicon, whether the internal copy behaves, and what
+       the part's on-die ECC does to the spare area.</p>
+
+    <div class="warn">
+      <p><strong>A wrong column byte order fails open.</strong> It reads <code>0xFF</code> from the wrong
+         place, the factory bad-block scan concludes every block is good, and nothing is retired. The host
+         simulator cannot catch this, because it decodes the column address the same way your driver encodes
+         it. Run the on-device read test before deploying.</p>
+    </div>

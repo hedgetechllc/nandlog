@@ -1,0 +1,356 @@
+<!-- title: Performance | desc: What each nandlog operation costs in flash operations and RAM, with measured figures from a 4 KB-page part. -->
+    <h1>Performance</h1>
+    <p class="lede">What each call costs, in flash operations rather than wall-clock.</p>
+
+    <p>Flash operations dominate everything else by orders of magnitude, so that is the unit. Symbols:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Symbol</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><strong>E</strong></td><td>pages in the selected epoch</td></tr>
+        <tr><td><strong>S</strong></td><td>pages an open read will deliver</td></tr>
+        <tr><td><strong>N</strong></td><td>pages in the log region</td></tr>
+        <tr><td><strong>B</strong></td><td>blocks in the log region</td></tr>
+        <tr><td><strong>M</strong></td><td>pages in the metadata ring (8 &times; pages-per-block)</td></tr>
+        <tr><td><strong>C</strong></td><td>blocks on the part</td></tr>
+        <tr><td><strong>r</strong></td><td>pending retransmission requests</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Complexity</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Call</th><th>Flash work</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog_probe()</code></td><td>O(1) &mdash; one identity read, no page reads</td></tr>
+        <tr><td><code>nandlog_init()</code>, first ever boot</td><td><strong>O(C)</strong> page reads &mdash; one per block, for the factory bad-block markers</td></tr>
+        <tr><td><code>nandlog_init()</code>, every boot after</td><td><strong>O(M + log N)</strong> page reads</td></tr>
+        <tr><td><code>nandlog_deinit()</code></td><td>O(1)</td></tr>
+        <tr><td><code>nandlog_data_bytes_per_page()</code></td><td>none</td></tr>
+        <tr><td><code>nandlog_store_record()</code></td><td>none directly; amortized one page program per page's worth of records</td></tr>
+        <tr><td>&nbsp;&nbsp;&mdash; one page commit, good case</td><td>1 program + 1 read-back</td></tr>
+        <tr><td>&nbsp;&nbsp;&mdash; one page commit, block fails</td><td>&le; <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> &times; (1 erase + &le; pages-per-block relocations + an O(B) walk)</td></tr>
+        <tr><td>&nbsp;&nbsp;&mdash; once per block written</td><td><code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases</td></tr>
+        <tr><td><code>nandlog_flush(true)</code></td><td>one page commit</td></tr>
+        <tr><td><code>nandlog_begin_epoch()</code></td><td>&le; M programs worst case, 1 typically, plus a few erases</td></tr>
+        <tr><td><code>nandlog_retrieve_epoch_details()</code></td><td>1 page read</td></tr>
+        <tr><td><code>nandlog_epoch_count()</code> / <code>_info()</code></td><td>O(M) header reads &mdash; one pass over the ring</td></tr>
+        <tr><td><code>nandlog_select_epoch()</code></td><td>O(M) header reads, plus 2</td></tr>
+        <tr><td><code>nandlog_select_current_epoch()</code></td><td>none</td></tr>
+        <tr><td><code>nandlog_begin_reading(0, 0)</code></td><td>none</td></tr>
+        <tr><td><code>nandlog_begin_reading(t, 0)</code></td><td><strong>O(E)</strong> header reads, stopping at the first page that reaches the bound</td></tr>
+        <tr><td><code>nandlog_begin_reading(0, t)</code></td><td><strong>O(E)</strong> header reads &mdash; a full pass over the epoch, always</td></tr>
+        <tr><td><code>nandlog_begin_reading(t0, t1)</code></td><td><strong>O(E)</strong> header reads, up to 2E</td></tr>
+        <tr><td><code>nandlog_read_span(&amp;pages, NULL)</code></td><td>none &mdash; the page count is arithmetic</td></tr>
+        <tr><td><code>nandlog_read_span(&amp;pages, &amp;bytes)</code></td><td><strong>O(S)</strong> whole-page reads</td></tr>
+        <tr><td><code>nandlog_retrieve_next_page()</code></td><td>1 page read; an O(B) walk when it steps over a retired block</td></tr>
+        <tr><td><code>nandlog_retrieve_page_by_seq()</code></td><td>O(log E) typically; O(E log E) worst case, when long runs of pages fail validation</td></tr>
+        <tr><td><code>nandlog_retransmit_clear/add/count()</code></td><td>none; O(count) in RAM</td></tr>
+        <tr><td><code>nandlog_retransmit_total_bytes()</code></td><td><strong>O(r log E)</strong> page reads</td></tr>
+        <tr><td><code>nandlog_retrieve_retransmit_page()</code></td><td>O(log E) page reads</td></tr>
+        <tr><td><code>nandlog_read_recent_page(k)</code></td><td>1 page read; O(k) arithmetic to walk back</td></tr>
+        <tr><td><code>nandlog_framed_next_record()</code></td><td>none</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Bus traffic versus flash time</h2>
+
+    <div class="note">
+      <p>Almost everything the log reads is a 32-byte header out of a 4&nbsp;KB page, so it reads 32 bytes.
+         Boot, the write-head search, the time-bound seek and the sequence-number lookup all use
+         <code>nandlog_chip_read_page_region()</code>. Only <code>nandlog_read_span()</code>'s byte pass
+         needs a whole page, because it verifies payload CRCs.</p>
+      <p>This saves bus time, not flash time: page-read <em>counts</em> in the table above are unaffected.
+         <strong>How much that is worth depends on the platform, and is usually less than the byte counts
+         suggest</strong> &mdash; see the measurements below.</p>
+    </div>
+
+    <h2>Measured: operation counts</h2>
+
+    <p>Simulator figures for the Alliance AS5F18G04SND &mdash; 4&nbsp;KB pages, 64 pages per block, 4096
+       blocks &mdash; with a 100-page epoch.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Operation</th><th>Page reads</th><th>Bus bytes</th></tr></thead>
+      <tbody>
+        <tr><td>First ever boot (factory bad-block scan)</td><td>4689</td><td>43.7 kB</td></tr>
+        <tr><td>Every boot after</td><td>614</td><td>24.9 kB</td></tr>
+        <tr><td><code>begin_reading(0, 0)</code></td><td>0</td><td>&mdash;</td></tr>
+        <tr><td><code>begin_reading(t, 0)</code>, bound 14 pages in</td><td>14</td><td>&mdash;</td></tr>
+        <tr><td><code>begin_reading(0, t)</code></td><td>100</td><td>&mdash;</td></tr>
+        <tr><td><code>begin_reading(t0, t1)</code></td><td>114</td><td>&mdash;</td></tr>
+        <tr><td><code>read_span()</code> with an exact byte total, 68-page span</td><td>67</td><td>&mdash;</td></tr>
+        <tr><td>Serving those 68 pages</td><td>68</td><td>&mdash;</td></tr>
+        <tr><td><code>retrieve_page_by_seq()</code></td><td>2</td><td>&mdash;</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Measured: what a read actually costs</h2>
+
+    <p>Measured on an Ambiq Apollo4 Plus at 48&nbsp;MHz SPI with on-die ECC enabled, using the DWT cycle
+       counter.</p>
+
+    <figure>
+      <svg class="dia" viewBox="0 0 640 200" role="img" aria-label="A whole-page read costs 1188 microseconds and a header read 495, of which 490 is fixed overhead in both cases.">
+        <text x="20" y="18" class="hd">What a read costs, and what it is made of</text>
+
+        <text x="20" y="54" class="mono">whole page</text>
+        <rect class="bar2" x="130" y="40" width="181" height="22"/>
+        <rect class="bar"  x="311" y="40" width="292" height="22"/>
+        <text x="220" y="56" text-anchor="middle" class="sm" style="fill:var(--d-text)">431 fixed</text>
+        <text x="457" y="56" text-anchor="middle" class="sm" style="fill:#fff">695 &micro;s of data (4096 B)</text>
+        <text x="20" y="74" class="sm">1126 &micro;s</text>
+
+        <text x="20" y="114" class="mono">32-byte header</text>
+        <rect class="bar2" x="130" y="100" width="181" height="22"/>
+        <rect class="bar"  x="311" y="100" width="2"   height="22"/>
+        <text x="220" y="116" text-anchor="middle" class="sm" style="fill:var(--d-text)">431 fixed</text>
+        <text x="323" y="116" class="sm">5 &micro;s of data</text>
+        <text x="20" y="134" class="sm">436 &micro;s</text>
+
+        <line x1="130" y1="150" x2="629" y2="150"/>
+        <text x="130" y="166" class="sm">0</text>
+        <text x="336" y="166" text-anchor="middle" class="sm">500</text>
+        <text x="546" y="166" text-anchor="middle" class="sm">1000</text>
+        <text x="629" y="166" text-anchor="end" class="sm">&micro;s</text>
+
+        <text x="130" y="190" class="sm" style="fill:var(--d-accent)">Reading 128&times; fewer bytes takes 2.6&times; less time, not 128&times;: the fixed cost dominates.</text>
+      </svg>
+      <figcaption><b>Figure 1.</b> Measured on an Apollo4 Plus at 48&nbsp;MHz SPI. Fitting the two points
+        gives 0.17&nbsp;&micro;s per byte &mdash; 97.7&nbsp;% of wire speed &mdash; and 431&nbsp;&micro;s of
+        fixed cost per read, of which roughly 350&nbsp;&micro;s is the part's own page latch.</figcaption>
+    </figure>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Read</th><th>Bytes</th><th>Time</th></tr></thead>
+      <tbody>
+        <tr><td>Page header only</td><td>32</td><td>436&nbsp;&micro;s</td></tr>
+        <tr><td>Whole page</td><td>4096</td><td>1126&nbsp;&micro;s</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Fitting those two points gives <strong>0.17&nbsp;&micro;s per byte</strong> &mdash; 97.7&nbsp;% of
+       48&nbsp;MHz wire speed, so bulk transfer is efficient &mdash; and <strong>431&nbsp;&micro;s of fixed
+       cost per read, independent of length</strong>.</p>
+
+    <p>That fixed cost is almost entirely the part. Isolating the page latch &mdash; the interval during
+       which the part reports itself busy after a read command &mdash; by bisection:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Condition</th><th>Latch</th></tr></thead>
+      <tbody>
+        <tr><td>On-die ECC enabled, written page</td><td>361&nbsp;&micro;s</td></tr>
+        <tr><td>On-die ECC enabled, erased page</td><td>361&nbsp;&micro;s</td></tr>
+        <tr><td>On-die ECC disabled</td><td>244&nbsp;&micro;s</td></tr>
+        <tr><td><em>Datasheet maximum for a 4&nbsp;KB page</em></td><td><em>140&nbsp;&micro;s</em></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p><strong>The latch is 82&nbsp;% of a header read</strong>, and on-die ECC accounts for 117&nbsp;&micro;s
+       of it &mdash; a fixed cost, identical on an erased page as on a written one, so it is the engine
+       running rather than correction effort. The remaining 104&nbsp;&micro;s above the datasheet's stated
+       maximum is unexplained; the figure evidently excludes the ECC engine, and this part is a 1.8&nbsp;V
+       variant while the datasheet quotes one read time for the family.</p>
+
+    <p>Each <code>nandlog_port_transfer_*</code> call adds about 30&nbsp;&micro;s of host-side overhead
+       independent of payload, and a status-register read costs the same. The library keeps those calls to a
+       minimum &mdash; the status word that ends a busy wait already carries the ECC verdict, so a page read
+       asks the part for its status once rather than three times &mdash; but the latch is not something
+       software can shorten.</p>
+
+    <div class="warn">
+      <p><strong>Budget from measurement, not from the datasheet.</strong> A design that assumed the stated
+         140&nbsp;&micro;s would be wrong by a factor of three on this part. <code>tests/</code> contains the
+         test that produces the table above; run it on your own part before sizing anything around read
+         latency.</p>
+    </div>
+
+    <div class="warn">
+      <p><strong>A header read is 99&nbsp;% fixed overhead.</strong> Reading 32 bytes instead of 4096
+         therefore costs 39&nbsp;% of a whole-page read, not 0.8&nbsp;%. Over a full epoch of this part
+         &mdash; 257,024 pages &mdash; a bounded download open takes 112&nbsp;s rather than 289&nbsp;s: a
+         real <strong>2.6&times;</strong>, not the 128&times; the byte counts alone would suggest. A warm
+         boot is 225&nbsp;ms rather than roughly 690&nbsp;ms.</p>
+      <p>On a platform with lower per-transaction overhead, or a faster bus, the ratio moves toward the byte
+         counts. Measure it on yours before designing around either figure.</p>
+    </div>
+
+    <h3>Reducing download cost</h3>
+
+    <ul>
+      <li><strong>Pass <code>NULL</code> for the byte total</strong> unless a host needs it to size a buffer. That removes a whole-page read of every page in the span.</li>
+      <li><strong>Leave the end bound at zero</strong> and filter on the host. The end-bound seek is a full pass over the epoch, every time.</li>
+      <li>A start bound alone costs only as far as the page it finds.</li>
+    </ul>
+
+    <h2>Relocation</h2>
+
+    <figure>
+      <svg class="dia" viewBox="0 0 640 150" role="img" aria-label="Relocating a page costs 1214 microseconds inside the chip against 2747 microseconds via a read and a write.">
+        <text x="20" y="18" class="hd">Relocating one page</text>
+
+        <text x="20" y="50" class="mono">internal copy</text>
+        <rect class="bar" x="170" y="36" width="207" height="22"/>
+        <text x="385" y="52" class="sm">1149 &micro;s</text>
+
+        <text x="20" y="90" class="mono">read + write back</text>
+        <rect class="bar2" x="170" y="76" width="207" height="22"/>
+        <rect class="bar2" x="377" y="76" width="266" height="22" style="opacity:.45"/>
+        <text x="510" y="92" text-anchor="middle" class="sm" style="fill:var(--d-text)">+1477 &micro;s on the bus</text>
+
+        <line x1="170" y1="112" x2="629" y2="112"/>
+        <text x="170" y="128" class="sm">0</text>
+        <text x="350" y="128" text-anchor="middle" class="sm">1000</text>
+        <text x="530" y="128" text-anchor="middle" class="sm">2000</text>
+        <text x="629" y="128" text-anchor="end" class="sm">&micro;s</text>
+      </svg>
+      <figcaption><b>Figure 2.</b> The 1477&nbsp;&micro;s saved is almost exactly the 1390&nbsp;&micro;s that
+        4096 bytes in each direction would cost on the bus. Unlike a partial read, this removes whole
+        transfers rather than shortening them &mdash; which is why it is worth 55&nbsp;% here and the partial
+        read is worth 39&nbsp;%.</figcaption>
+    </figure>
+
+    <p>Measured on hardware, per page:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Method</th><th>Per page</th><th>Per 64-page block</th></tr></thead>
+      <tbody>
+        <tr><td>Chip-internal copy</td><td>1149&nbsp;&micro;s</td><td>73&nbsp;ms</td></tr>
+        <tr><td>Read into RAM and write back</td><td>2626&nbsp;&micro;s</td><td>168&nbsp;ms</td></tr>
+        <tr><td><strong>Saving</strong></td><td><strong>1477&nbsp;&micro;s (56&nbsp;%)</strong></td><td><strong>95&nbsp;ms</strong></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The saving of 1477&nbsp;&micro;s is almost exactly the 1390&nbsp;&micro;s of bus time that 4096 bytes
+       in each direction would have cost, which is what the optimisation was for. Unlike the partial-read
+       case, this one removes whole transfers rather than shortening them &mdash; which is why it is worth
+       56&nbsp;% and a partial read is worth 39&nbsp;%.</p>
+
+    <p>In simulator bus-traffic terms, retiring one block and relocating the twenty pages already written in
+       it:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Bus traffic</th></tr></thead>
+      <tbody>
+        <tr><td><code>NANDLOG_CHIP_PAGE_COPY = 1</code> (internal copy)</td><td>24,878 bytes</td></tr>
+        <tr><td><code>NANDLOG_CHIP_PAGE_COPY = 0</code> (read and write)</td><td>188,798 bytes</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>What remains in the first row is not the relocation: it is the three full-page program attempts the
+       block refused before it was retired, the bad-block marker page, and the one page that actually had to
+       be written and verified. The relocation itself moves six bytes of address per page.</p>
+
+    <h2>Boot</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Event</th><th>Measured</th></tr></thead>
+      <tbody>
+        <tr><td>Warm boot (<code>nandlog_init()</code>, 614 page reads)</td><td>225&nbsp;ms</td></tr>
+        <tr><td>&mdash; of which the 512-slot metadata ring scan</td><td>~253&nbsp;ms-equivalent, i.e. nearly all of it</td></tr>
+        <tr><td>Full-array bad-block scan (4096 blocks)</td><td>1.79&nbsp;s</td></tr>
+        <tr><td>Retired blocks on a sample part, via <code>nandlog_bad_block_count()</code></td><td>7 of 4096 (0.17&nbsp;%)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Boot is dominated by the metadata ring scan, which reads one header from each of 512 slots. Because a
+       header read is almost all fixed cost, that figure is set by the number of reads rather than by their
+       size.</p>
+
+    <h2>Blocking time</h2>
+
+    <p>Measured on an Ambiq Apollo4 Plus (Cortex-M4F) with the Alliance part on a 48&nbsp;MHz SPI bus, over
+       roughly 488 page writes and 12 erase-ahead activations, using the DWT cycle counter.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Operation</th><th>Max observed</th><th>Frequency</th><th>Amortized per page</th></tr></thead>
+      <tbody>
+        <tr><td>One page commit</td><td>2855 &ndash; 2893 &micro;s</td><td>every page</td><td>2893 &micro;s</td></tr>
+        <tr><td>Erase-ahead (2 blocks)</td><td>1946 &ndash; 1989 &micro;s</td><td>every 64 pages</td><td><strong>30 &micro;s</strong></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Erase-ahead adds about 1&nbsp;% amortized overhead, and its worst single stall is below the per-page
+       cost already paid 64&times; more often.</p>
+
+    <h3>Bounded loops</h3>
+
+    <p>These loops run in whichever task calls the log, so every one has a stated bound. A part that has
+       stopped accepting programs must not turn a search into a spin that only a watchdog can end.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Loop</th><th>Bound</th></tr></thead>
+      <tbody>
+        <tr><td>Walking to the next good block</td><td>One pass over the log region's blocks</td></tr>
+        <tr><td>Relocating a page that will not stay written</td><td><code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> blocks, then <code>nandlog_port_unwritable()</code></td></tr>
+        <tr><td>Waiting for the part to clear BUSY</td><td><code>NANDLOG_BUSY_TIMEOUT_MS</code>, then <code>nandlog_port_fatal()</code></td></tr>
+        <tr><td>Programming one page</td><td><code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code> attempts before the block is retired</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Memory</h2>
+
+    <p>All static, all sized at compile time, nothing allocated. Measured with
+       <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> at 4096.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Object</th><th>Bytes</th><th>Composition</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog.c</code></td><td>13,425</td><td>3 &times; <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> + 4 &times; <code>NANDLOG_MAX_RETRANSMIT_PAGES</code> + ~110 bytes of state</td></tr>
+        <tr><td><code>nandlog_chip_AS5F18G04SND.c</code></td><td>5,385</td><td>One page-with-spare scratch buffer, a 256-entry bad-block table</td></tr>
+        <tr><td><code>nandlog_chip_W25N01GWZEIG.c</code></td><td>2,193</td><td>One page-with-spare scratch buffer, a 20-entry LUT mirror</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>About <strong>18.4&nbsp;kB</strong> for the Alliance part. The dominant term is the page budget, so a
+       build that lowers <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> to match a 2&nbsp;KB-page part saves about
+       6&nbsp;kB.</p>
+
+    <p>The only meaningful stack use is in the epoch-listing calls, which build a short array on the stack
+       (128 bytes at the default <code>NANDLOG_MAX_LISTED_EPOCHS</code> of 16) rather than caching a list of
+       epochs in RAM between calls.</p>
+
+    <h2>Failure handling</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Failure</th><th>Response</th></tr></thead>
+      <tbody>
+        <tr><td>Program reports failure</td><td>Retried; then the block is retired and any pages already written in it are relocated</td></tr>
+        <tr><td>Written page does not read back with a valid header</td><td>Same &mdash; the header CRC makes this exact rather than ECC-dependent</td></tr>
+        <tr><td>Erase reports failure</td><td>The block is retired</td></tr>
+        <tr><td>Power lost mid-program</td><td>The torn page fails its CRC on the next boot and is treated as a gap</td></tr>
+        <tr><td>Power lost mid-erase</td><td>The partially erased block reads as a gap and is rewritten or retired</td></tr>
+        <tr><td>Payload CRC mismatch on read</td><td>That page is reported as zero-length: a gap, not the end of the log</td></tr>
+        <tr><td>A page will not stay written anywhere</td><td>Relocation is retried across <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> blocks, then logging is disabled and <code>nandlog_port_unwritable()</code> is called</td></tr>
+        <tr><td>Part stops responding</td><td>Bounded busy-wait, then <code>nandlog_port_fatal()</code></td></tr>
+        <tr><td>Bad-block table implausible</td><td>Ignored rather than acted on, and rebuilt</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The consistent rule: <strong>a page that cannot be trusted is a gap, and a gap is not the end of the
+       log.</strong> Reads step over it; offload reports it as a zero-length page carrying its sequence
+       number, so a host can tell "still missing" from "never answered" and ask for it again.</p>

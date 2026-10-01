@@ -1,0 +1,268 @@
+<!-- title: Porting | desc: The thirteen functions in nandlog_port.c that connect the library to your platform, with a complete worked example for an Ambiq Apollo4 under FreeRTOS. -->
+    <h1>Porting</h1>
+    <p class="lede">Thirteen functions. One file. This is the only code you write.</p>
+
+    <p>Copy <code>nandlog_port.c</code> from the repository root into your own tree, delete its
+       <code>#error</code> line, and fill in the stubs. Everything above this file is platform-independent.</p>
+
+    <h2>The interface</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Function</th><th>Responsibility</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog_port_init</code></td><td>Configure the SPI peripheral and its pins; drive write-protect and hold to their inactive state. Return false to prevent the log coming up at all.</td></tr>
+        <tr><td><code>nandlog_port_deinit</code></td><td>Release the peripheral, leaving it in a state <code>init</code> can start from again.</td></tr>
+        <tr><td><code>nandlog_port_transfer_read</code></td><td>One command byte, <em>n</em> address bytes, then clock data back &mdash; as one exchange the part sees as uninterrupted.</td></tr>
+        <tr><td><code>nandlog_port_transfer_write</code></td><td>The same in the other direction.</td></tr>
+        <tr><td><code>nandlog_port_lock</code> / <code>_unlock</code></td><td>Serialise the library against itself.</td></tr>
+        <tr><td><code>nandlog_port_write_enable</code></td><td>Gate the part's write-protect pin: true permits programming and erasing.</td></tr>
+        <tr><td><code>nandlog_port_power</code></td><td>Wake the peripheral or return it to its lowest-power state.</td></tr>
+        <tr><td><code>nandlog_port_log</code></td><td><code>printf</code>-style sink for the library's diagnostics.</td></tr>
+        <tr><td><code>nandlog_port_delay_us</code></td><td>Busy-wait. Called often, to pace the BUSY poll; must be cheap and must not yield.</td></tr>
+        <tr><td><code>nandlog_port_delay_ms</code></td><td>Coarse delay, used only while waiting for a part to come up. Yielding is fine.</td></tr>
+        <tr><td><code>nandlog_port_fatal</code></td><td>The part stopped answering. Not expected to return.</td></tr>
+        <tr><td><code>nandlog_port_unwritable</code></td><td>The part answers, but no block will retain a page.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Four things worth getting right</h2>
+
+    <h3>The transfer shape is command, address, data</h3>
+
+    <p>Both transfer functions take <code>(command, address, address_length, buffer, length)</code>. The
+       command byte and address bytes go out first, then the data, with chip-select asserted across the
+       whole exchange.</p>
+
+    <ul>
+      <li><code>address</code> may be <code>NULL</code> with <code>address_length</code> zero.</li>
+      <li><code>length</code> may be zero, <strong>and that transfer must still be issued</strong> &mdash; a part can require the empty transaction to complete the command.</li>
+      <li><code>length</code> may exceed a whole page. If your peripheral has a maximum transaction size, split across as many transactions as needed, keeping chip-select asserted between them.</li>
+      <li>There is no error return. A transfer either completes or does not return, so a failure that cannot be retried has to end in <code>nandlog_port_fatal()</code>.</li>
+    </ul>
+
+    <p>Nothing above this file names a bus. The shape is what NAND speaks whether it is wired to SPI in one,
+       two, four or eight lanes, or to a parallel ONFI bus with a port that drives the command and address
+       latches.</p>
+
+    <h3>The lock protects a shared cache register, not just a buffer</h3>
+
+    <div class="warn">
+      <p>A single-threaded system can leave both lock functions empty. Anything else must supply a real
+         mutex. Reading a page is a <em>sequence</em> of commands against the one cache register inside the
+         part &mdash; latch the page, then clock it out. Two callers interleaving those sequences read each
+         other's pages, and nothing about the bus traffic looks wrong.</p>
+    </div>
+
+    <p>Every public function takes the lock for its whole duration and does its work in an internal, so a
+       caller never holds it and these never nest. If the lock cannot be taken in every context you call
+       from &mdash; before the scheduler starts, or from an interrupt &mdash; detect that case and skip the
+       lock rather than blocking or failing.</p>
+
+    <h3>Write-protect polarity is a board property</h3>
+
+    <p>Most WP# pins are active low, but a board may invert one. Get this backwards and every program
+       silently fails.</p>
+
+    <h3>The two failure callbacks are not the same</h3>
+
+    <p><code>nandlog_port_fatal()</code> is called when the part stops answering at all &mdash; BUSY never
+       cleared, or a transfer failed past retrying. A library has no business resetting the system it is
+       embedded in, so what happens next is yours.</p>
+
+    <p><code>nandlog_port_unwritable()</code> is the softer failure: the part still answers, but no block
+       will retain a page. The log has already disabled itself and stopped trying. <strong>Nothing here is
+       urgent and nothing here should reset the system</strong> &mdash; it is still running, it just has
+       nowhere to put data. Leave a breadcrumb the next boot can find.</p>
+
+    <h2>Worked example: Ambiq Apollo4 under FreeRTOS</h2>
+
+    <p>A complete port, using the Ambiq HAL's IOM peripheral. The pin names, the <code>print()</code> sink
+       and the <code>system_*</code> calls belong to the surrounding firmware, not to nandlog.</p>
+
+    <h3>Initialisation</h3>
+
+<pre><code>#include "nandlog_port.h"
+#include "logging.h"      /* the firmware's print() sink                        */
+#include "system.h"       /* PIN_STORAGE_*, system_reset(), diagnostics         */
+
+static void *spi_handle;
+static SemaphoreHandle_t log_mutex;
+static StaticSemaphore_t log_mutex_buffer;
+
+bool nandlog_port_init(void)
+{
+   const am_hal_iom_config_t spi_config = {
+      .eInterfaceMode = AM_HAL_IOM_SPI_MODE,
+      .ui32ClockFreq  = AM_HAL_IOM_48MHZ,
+      .eSpiMode       = AM_HAL_IOM_SPI_MODE_0
+   };
+
+   /* Configure and assert the write-protect and hold pins to disable them */
+   am_hal_gpio_pinconfig(PIN_STORAGE_WRITE_PROTECT, am_hal_gpio_pincfg_output);
+   am_hal_gpio_output_set(PIN_STORAGE_WRITE_PROTECT);
+   am_hal_gpio_pinconfig(PIN_STORAGE_HOLD, am_hal_gpio_pincfg_output);
+   am_hal_gpio_output_set(PIN_STORAGE_HOLD);
+
+   /* Bring up the SPI module and its four pins */
+   am_hal_iom_initialize(STORAGE_SPI_NUMBER, &amp;spi_handle);
+   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_SCK,  sck_config);
+   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_MISO, miso_config);
+   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_MOSI, mosi_config);
+   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_CS,   cs_config);
+   am_hal_iom_power_ctrl(spi_handle, AM_HAL_SYSCTRL_WAKE, false);
+   am_hal_iom_configure(spi_handle, &amp;spi_config);
+   am_hal_iom_enable(spi_handle);
+   return true;
+}
+
+void nandlog_port_deinit(void)
+{
+   am_hal_iom_disable(spi_handle);
+   am_hal_iom_uninitialize(spi_handle);
+   spi_handle = NULL;
+}</code></pre>
+
+    <h3>Transfers</h3>
+
+    <p>The command and address go out as one transaction with <code>bContinue</code> set, so chip-select
+       stays asserted; the data then follows, split across as many transactions as the peripheral's maximum
+       allows. The transaction count is fixed <em>before</em> the loop rather than tested against the
+       remaining length, so a zero-length read still issues the single empty transaction that smaller-page
+       parts rely on.</p>
+
+<pre><code>void nandlog_port_transfer_read(uint8_t command, const void *address, uint32_t address_length,
+                                void *read_buffer, uint32_t read_length)
+{
+   uint32_t instruction = command, retries_remaining = 4;
+   uint32_t num_reads = 1 + (read_length / (1 + AM_HAL_IOM_MAX_TXNSIZE_SPI));
+   memcpy(((uint8_t*)&amp;instruction) + 1, address, address_length);
+   am_hal_iom_transfer_t spi_transaction = {
+      .eDirection    = AM_HAL_IOM_TX,
+      .ui32NumBytes  = 1 + address_length,
+      .pui32TxBuffer = &amp;instruction,
+      .bContinue     = true,
+      .ui8Priority   = 1
+   };
+
+   /* A transfer either completes or does not return */
+   while (--retries_remaining &amp;&amp;
+          (am_hal_iom_blocking_transfer(spi_handle, &amp;spi_transaction) != AM_HAL_STATUS_SUCCESS))
+      am_hal_delay_us(10);
+   if (!retries_remaining)
+      system_reset(true);
+
+   uint32_t read_offset = 0;
+   while (num_reads--)
+   {
+      uint32_t read_bytes = (read_length &gt; AM_HAL_IOM_MAX_TXNSIZE_SPI)
+                          ? AM_HAL_IOM_MAX_TXNSIZE_SPI : read_length;
+      read_length -= read_bytes;
+
+      retries_remaining = 4;
+      spi_transaction.eDirection    = AM_HAL_IOM_RX;
+      spi_transaction.ui32NumBytes  = read_bytes;
+      spi_transaction.pui32TxBuffer = NULL;
+      spi_transaction.pui32RxBuffer = (uint32_t*)((uint8_t*)read_buffer + read_offset);
+      spi_transaction.bContinue     = read_length &gt; 0;
+      read_offset += read_bytes;
+
+      while (--retries_remaining &amp;&amp;
+             (am_hal_iom_blocking_transfer(spi_handle, &amp;spi_transaction) != AM_HAL_STATUS_SUCCESS))
+         am_hal_delay_us(10);
+      if (!retries_remaining)
+         system_reset(true);
+   }
+}
+
+/* nandlog_port_transfer_write() is this function with the directions reversed,
+   and splits its payload the same way for the same reason. */</code></pre>
+
+    <h3>Locking</h3>
+
+    <p>Before the scheduler runs there is exactly one context, so there is nothing to serialise against
+       &mdash; and taking a FreeRTOS mutex there, or from an interrupt, is an error rather than a wait. The
+       mutex is created on first use, which is guaranteed to be after the scheduler has started, and the
+       double check under a critical section makes the creation itself safe against two tasks arriving
+       together.</p>
+
+<pre><code>static inline bool locking_applies(void)
+{
+   return (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) &amp;&amp; !xPortIsInsideInterrupt();
+}
+
+void nandlog_port_lock(void)
+{
+   if (locking_applies())
+   {
+      if (!log_mutex)
+      {
+         taskENTER_CRITICAL();
+         if (!log_mutex)
+            log_mutex = xSemaphoreCreateMutexStatic(&amp;log_mutex_buffer);
+         taskEXIT_CRITICAL();
+      }
+      if (log_mutex)
+         xSemaphoreTake(log_mutex, portMAX_DELAY);
+   }
+}
+
+void nandlog_port_unlock(void)
+{
+   if (log_mutex &amp;&amp; locking_applies())
+      xSemaphoreGive(log_mutex);
+}</code></pre>
+
+    <h3>The rest</h3>
+
+    <p>On this board the write-protect pin is asserted <strong>high</strong> to permit programming.</p>
+
+<pre><code>void nandlog_port_write_enable(bool enable)
+{
+   if (enable)
+      am_hal_gpio_output_set(PIN_STORAGE_WRITE_PROTECT);
+   else
+      am_hal_gpio_output_clear(PIN_STORAGE_WRITE_PROTECT);
+}
+
+void nandlog_port_power(bool awake)
+{
+   am_hal_iom_power_ctrl(spi_handle, awake ? AM_HAL_SYSCTRL_WAKE : AM_HAL_SYSCTRL_DEEPSLEEP, true);
+}
+
+void nandlog_port_delay_us(uint32_t microseconds) { am_hal_delay_us(microseconds); }
+void nandlog_port_delay_ms(uint32_t milliseconds) { am_util_delay_ms(milliseconds); }
+
+void nandlog_port_log(const char *format, ...)
+{
+   char message[160];
+   va_list args;
+   va_start(args, format);
+   vsnprintf(message, sizeof(message), format, args);
+   va_end(args);
+   print("%s", message);
+}
+
+void nandlog_port_fatal(const char *reason)
+{
+   print("ERROR: Storage hardware fault: %s; resetting\n", reason);
+   system_record_diagnostic(RESET_DIAGNOSTIC_STORAGE_FATAL);
+   system_reset(true);
+}
+
+void nandlog_port_unwritable(void)
+{
+   /* Not a reason to reset: the device still works, it just has nowhere to put data.
+      Leave a breadcrumb so the next boot's log says the flash has already given up. */
+   system_record_diagnostic(RESET_DIAGNOSTIC_STORAGE_UNWRITABLE);
+}</code></pre>
+
+    <h2>Checking your port</h2>
+
+    <ol>
+      <li><code>nandlog_probe()</code> should return true. If it does not, the part is not answering its identity command &mdash; check wiring, clock polarity and chip-select.</li>
+      <li><code>nandlog_init()</code> should return true, and a first boot will scan every block for factory bad-block markers.</li>
+      <li>Store a few records, <code>nandlog_flush(true)</code>, and read them back. If writes appear to succeed but nothing reads back, check write-protect polarity.</li>
+      <li>Run the three <a href="testing.html">on-device tests</a>, which exercise the parts of the chip interface a host simulator cannot.</li>
+    </ol>

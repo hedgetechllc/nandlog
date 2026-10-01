@@ -1,0 +1,279 @@
+<!-- title: On-Flash Format | desc: The nandlog page header, metadata header, record framing and offload wire format, as written to the part and sent over the wire. -->
+    <h1>On-Flash Format</h1>
+    <p class="lede">What nandlog writes, and how to read it without the library.</p>
+
+    <p><code>tools/nandlog_parse.py</code> is the reference reader for everything on this page. CRC-32 uses
+       the IEEE&nbsp;802.3 polynomial, byte-for-byte identical to Python's <code>zlib.crc32</code>.</p>
+
+    <h2>Array layout</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Region</th><th>Extent</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td>Metadata ring</td><td>the first 8 blocks</td><td>A ring of slots, each describing one epoch</td></tr>
+        <tr><td>Log region</td><td>everything between</td><td>Data pages, written in sequence</td></tr>
+        <tr><td>Reserve</td><td>the top <em>N</em> blocks</td><td>Held by the chip driver for bad-block management</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>All multi-byte fields are little-endian, and all structures are packed with no padding.</p>
+
+    <figure>
+      <svg class="dia" viewBox="0 0 640 170" role="img" aria-label="The array divided into a metadata ring of eight blocks, a log region, and a reserve at the top.">
+        <rect class="accent" x="20"  y="34" width="88"  height="46"/>
+        <rect class="box"    x="108" y="34" width="420" height="46"/>
+        <rect class="box"    x="528" y="34" width="92"  height="46" style="fill:var(--d-fill);stroke-dasharray:4 2"/>
+
+        <text x="64"  y="26" text-anchor="middle" class="hd">metadata ring</text>
+        <text x="318" y="26" text-anchor="middle" class="hd">log region</text>
+        <text x="574" y="26" text-anchor="middle" class="hd">reserve</text>
+
+        <text x="64"  y="61" text-anchor="middle" class="sm">8 blocks</text>
+        <text x="64"  y="75" text-anchor="middle" class="sm">epoch slots</text>
+        <text x="318" y="61" text-anchor="middle" class="sm">data pages, written in sequence</text>
+        <text x="318" y="75" text-anchor="middle" class="sm">the write head sweeps forward and wraps</text>
+        <text x="574" y="61" text-anchor="middle" class="sm">top N blocks</text>
+        <text x="574" y="75" text-anchor="middle" class="sm">bad blocks</text>
+
+        <text x="20"  y="97" class="mono">block 0</text>
+        <text x="620" y="97" text-anchor="end" class="mono">block N-1</text>
+
+        <path d="M 150 118 L 470 118" style="stroke:var(--d-accent);stroke-width:1.5"/>
+        <path d="M 470 118 l -7 -4 l 0 8 z" style="fill:var(--d-accent);stroke:none"/>
+        <text x="310" y="112" text-anchor="middle" class="sm" style="fill:var(--d-accent)">write head</text>
+        <path d="M 470 128 q 40 22 -320 22 L 150 150" style="stroke:var(--d-accent);stroke-dasharray:4 3"/>
+        <path d="M 150 150 l 7 -4 l 0 8 z" style="fill:var(--d-accent);stroke:none"/>
+        <text x="310" y="165" text-anchor="middle" class="sm" style="fill:var(--d-accent)">wraps, erasing each block just before it needs it</text>
+      </svg>
+      <figcaption><b>Figure 1.</b> The three regions. An earlier epoch is not erased when a new one begins
+        &mdash; it is reclaimed lazily as the head sweeps back around to it.</figcaption>
+    </figure>
+
+    <h2>Page header</h2>
+
+    <p>32 bytes at the start of every data page, followed by the payload.</p>
+
+<pre><code>typedef struct __attribute__((__packed__))
+{
+   uint32_t magic;               /* 'TTP1' opaque, or 'TTP2' length-framed      */
+   uint32_t epoch;               /* which generation of the log this belongs to */
+   uint32_t seq;                 /* page index within the epoch, from 0         */
+   uint32_t first_timestamp;     /* of the first record, or 0xFFFFFFFF          */
+   uint32_t last_timestamp;      /* of the last record, or 0xFFFFFFFF           */
+   uint16_t payload_length;      /* valid payload bytes                         */
+   uint16_t record_count;        /* complete records in the payload             */
+   uint32_t payload_crc;         /* CRC-32 over payload[0 .. payload_length)    */
+   uint32_t header_crc;          /* CRC-32 over this header, excluding itself   */
+} nandlog_page_header_t;</code></pre>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>NANDLOG_PAGE_MAGIC</code></td><td><code>0x31505454</code> ('TTP1')</td><td>Records are opaque to the log</td></tr>
+        <tr><td><code>NANDLOG_PAGE_MAGIC_FRAMED</code></td><td><code>0x32505454</code> ('TTP2')</td><td>Each record carries its own length</td></tr>
+        <tr><td><code>NANDLOG_NO_TIMESTAMP</code></td><td><code>0xFFFFFFFF</code></td><td>No timestamp recorded</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The two checksums are separate. The header CRC lets a reader trust the length and sequence fields
+       before it has read the payload, which is what makes a header-only read meaningful.</p>
+
+    <p>A page is <strong>valid</strong> when its magic is one of the two values, its header CRC matches, and
+       its <code>payload_length</code> does not exceed what a page can hold. A valid page whose payload CRC
+       does not match is reported as a <strong>gap</strong>: a zero-length page carrying its own sequence
+       number, not the end of the log.</p>
+
+    <figure>
+      <svg class="dia" viewBox="0 0 640 210" role="img" aria-label="A page: a 32-byte header of ten fields followed by the payload.">
+        <rect class="accent" x="20"  y="44" width="190" height="34"/>
+        <rect class="box"    x="210" y="44" width="410" height="34"/>
+        <text x="115" y="66"  text-anchor="middle" class="mono">32-byte header</text>
+        <text x="415" y="66"  text-anchor="middle" class="mono">payload</text>
+        <text x="20"  y="36"  class="sm">offset 0</text>
+        <text x="210" y="36"  text-anchor="middle" class="sm">32</text>
+        <text x="620" y="36"  text-anchor="end" class="sm">page size</text>
+
+        <line x1="20" y1="86" x2="20" y2="100"/>
+        <line x1="210" y1="86" x2="210" y2="100"/>
+        <line x1="20" y1="100" x2="210" y2="100"/>
+        <path d="M 20 100 L 20 118 M 210 100 L 620 118" style="stroke:var(--d-line);stroke-dasharray:3 3"/>
+
+        <rect class="box" x="20"  y="118" width="60" height="28"/>
+        <rect class="box" x="80"  y="118" width="60" height="28"/>
+        <rect class="box" x="140" y="118" width="55" height="28"/>
+        <rect class="box" x="195" y="118" width="85" height="28"/>
+        <rect class="box" x="280" y="118" width="85" height="28"/>
+        <rect class="box" x="365" y="118" width="55" height="28"/>
+        <rect class="box" x="420" y="118" width="48" height="28"/>
+        <rect class="accent" x="468" y="118" width="76" height="28"/>
+        <rect class="accent" x="544" y="118" width="76" height="28"/>
+
+        <text x="50"  y="136" text-anchor="middle" class="mono">magic</text>
+        <text x="110" y="136" text-anchor="middle" class="mono">epoch</text>
+        <text x="167" y="136" text-anchor="middle" class="mono">seq</text>
+        <text x="237" y="136" text-anchor="middle" class="mono">first_ts</text>
+        <text x="322" y="136" text-anchor="middle" class="mono">last_ts</text>
+        <text x="392" y="136" text-anchor="middle" class="mono">len</text>
+        <text x="444" y="136" text-anchor="middle" class="mono">cnt</text>
+        <text x="506" y="136" text-anchor="middle" class="mono">pld_crc</text>
+        <text x="582" y="136" text-anchor="middle" class="mono">hdr_crc</text>
+
+        <text x="50"  y="159" text-anchor="middle" class="sm">4</text>
+        <text x="110" y="159" text-anchor="middle" class="sm">4</text>
+        <text x="167" y="159" text-anchor="middle" class="sm">4</text>
+        <text x="237" y="159" text-anchor="middle" class="sm">4</text>
+        <text x="322" y="159" text-anchor="middle" class="sm">4</text>
+        <text x="392" y="159" text-anchor="middle" class="sm">2</text>
+        <text x="444" y="159" text-anchor="middle" class="sm">2</text>
+        <text x="506" y="159" text-anchor="middle" class="sm">4</text>
+        <text x="582" y="159" text-anchor="middle" class="sm">4</text>
+
+        <path d="M 20 178 L 464 178" style="stroke:var(--d-accent)"/>
+        <path d="M 20 178 l 0 -5 M 464 178 l 0 -5" style="stroke:var(--d-accent)"/>
+        <text x="242" y="194" text-anchor="middle" class="sm" style="fill:var(--d-accent)">covered by hdr_crc</text>
+        <path d="M 468 193 L 620 193" style="stroke:var(--d-accent)"/>
+        <text x="544" y="208" text-anchor="middle" class="sm" style="fill:var(--d-accent)">two checksums, deliberately</text>
+      </svg>
+      <figcaption><b>Figure 2.</b> A data page. Two separate checksums: the header CRC lets a reader trust
+        <code>seq</code>, <code>payload_length</code> and the timestamps <em>before</em> reading the payload,
+        which is what makes a 32-byte structural read meaningful.</figcaption>
+    </figure>
+
+    <h2>Record framing</h2>
+
+    <p>A page announces which format it is in through its magic, so a log spanning a firmware change parses
+       correctly page by page.</p>
+
+    <h3>Framed (<code>TTP2</code>, the default)</h3>
+
+<pre><code>[data length: 2][record type: 1][timestamp: 4][data: data length]</code></pre>
+
+    <p>The length is little-endian and counts the data only, not the type or timestamp byte. A reader can
+       walk a page without knowing the application's record types. The prefixes are authoritative for
+       stepping in both directions: a record that decodes is still advanced past by its declared length, and
+       a record the reader does not recognise is stepped over exactly.</p>
+
+    <h3>Opaque (<code>TTP1</code>)</h3>
+
+<pre><code>[record type: 1][timestamp: 4][data]</code></pre>
+
+    <p>With <code>NANDLOG_RECORD_FRAMING</code> off, a record's extent is a property of the application that
+       wrote it. The payload is handed back whole and cannot be split by a generic reader.</p>
+
+    <p>Records are never split across pages. A record larger than
+       <code>nandlog_data_bytes_per_page()</code> is dropped.</p>
+
+    <h2>Metadata header</h2>
+
+    <p>One per epoch, in a slot of the metadata ring, followed by the caller's details blob.</p>
+
+<pre><code>typedef struct __attribute__((__packed__))
+{
+   uint32_t magic;               /* 'TTM1' = 0x314D5454                         */
+   uint32_t epoch;               /* the generation this page describes          */
+   uint32_t log_start_page;      /* physical page holding seq 0 for this epoch  */
+   uint32_t created_timestamp;   /* whatever the caller stamped                 */
+   uint16_t details_length;      /* bytes of caller-defined details following   */
+   uint16_t format_version;      /* 1 opaque, 2 framed                          */
+   uint32_t details_crc;         /* CRC-32 over the details blob                */
+   uint32_t header_crc;          /* CRC-32 over this header, excluding the      */
+                                 /*   trailing two words                        */
+   uint32_t reserved;
+} nandlog_meta_header_t;</code></pre>
+
+    <p>On boot the log reads the ring, takes the highest valid epoch, and binary-searches the log region for
+       the first page that does not belong to it. That page is the write head. The last page of the epoch
+       supplies the sequence number to continue from.</p>
+
+    <h2>Offload wire format</h2>
+
+    <p>A stream is a header, the caller's details blob, then each page framed with its own metadata.</p>
+
+<pre><code>Header:
+  u32   magic                'TTS1' = 0x31535454
+  u16   format_version       1 opaque, 2 framed
+  u16   details_length
+  u32   total_pages          including any zero-length gaps
+  u32   total_payload_bytes  sum of all payload lengths
+  u8[]  details              details_length bytes
+
+Then, per page:
+  u32   seq
+  u32   first_timestamp
+  u32   last_timestamp
+  u16   payload_length       0 means the device could not read this page
+  u16   record_count
+  u32   payload_crc
+  u8[]  payload              payload_length bytes</code></pre>
+
+    <figure>
+      <svg class="dia" viewBox="0 0 640 150" role="img" aria-label="An offload stream: a header, the details blob, then one frame per page, with a gap frame carrying zero payload.">
+        <rect class="accent" x="20"  y="24" width="96"  height="32"/>
+        <rect class="box"    x="116" y="24" width="74"  height="32"/>
+        <rect class="box"    x="190" y="24" width="72"  height="32"/>
+        <rect class="box"    x="262" y="24" width="118" height="32"/>
+        <rect class="box"    x="380" y="24" width="72"  height="32"/>
+        <rect class="box"    x="452" y="24" width="52"  height="32" style="stroke-dasharray:4 2"/>
+        <rect class="box"    x="504" y="24" width="72"  height="32"/>
+        <text x="596" y="45" class="mono">…</text>
+
+        <text x="68"  y="45" text-anchor="middle" class="mono">stream hdr</text>
+        <text x="153" y="45" text-anchor="middle" class="mono">details</text>
+        <text x="226" y="45" text-anchor="middle" class="mono">frame 0</text>
+        <text x="321" y="45" text-anchor="middle" class="mono">payload 0</text>
+        <text x="416" y="45" text-anchor="middle" class="mono">frame 1</text>
+        <text x="478" y="45" text-anchor="middle" class="mono">(none)</text>
+        <text x="540" y="45" text-anchor="middle" class="mono">frame 2</text>
+
+        <text x="68"  y="16" text-anchor="middle" class="sm">'TTS1'</text>
+        <text x="478" y="16" text-anchor="middle" class="sm" style="fill:var(--d-accent)">a gap</text>
+
+        <path d="M 452 64 L 452 84 L 300 84" style="stroke:var(--d-accent)"/>
+        <text x="296" y="88" text-anchor="end" class="sm" style="fill:var(--d-accent)">payload_length = 0</text>
+        <text x="296" y="104" text-anchor="end" class="sm">the device could not read this page, but its</text>
+        <text x="296" y="118" text-anchor="end" class="sm">seq is still reported, so the host can ask again</text>
+      </svg>
+      <figcaption><b>Figure 3.</b> An offload stream. A page that fails its CRC on the device is still
+        emitted, as a frame with zero payload, so a gap is explicit at a known sequence number rather than
+        silently absent.</figcaption>
+    </figure>
+
+    <p>A page that fails its CRC on the device is <strong>still emitted</strong>, with
+       <code>payload_length = 0</code>, so the host sees an explicit gap at a known sequence number rather
+       than silently missing data. The host re-verifies <code>payload_crc</code> independently, which also
+       catches corruption introduced in transit.</p>
+
+    <p>A page frame carries no magic, so the stream header's <code>format_version</code> says which record
+       grammar is inside.</p>
+
+    <div class="note">
+      <p><strong>Sequence numbers are contiguous within an epoch</strong>, so a host can identify exactly
+         which pages are missing and ask for them again &mdash; including pages lost to a truncated
+         transfer, which have no frame in the stream at all.</p>
+    </div>
+
+    <h2>Reading an image or a stream</h2>
+
+<pre><code>./tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
+./tools/nandlog_parse.py stream offload.bin
+./tools/nandlog_parse.py image  dump.bin --json</code></pre>
+
+    <p>The parser reports every epoch it finds, verifies every CRC, and isolates corrupt pages by sequence
+       number. It is an independent implementation of this page, which is the point: if the device and the
+       parser ever disagree, one of them is wrong.</p>
+
+    <h2>Format versions</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Macro</th><th>Versions</th></tr></thead>
+      <tbody>
+        <tr><td><code>NANDLOG_FORMAT_VERSION</code></td><td>The record grammar a build writes: 1 opaque, 2 framed. Follows <code>NANDLOG_RECORD_FRAMING</code>.</td></tr>
+        <tr><td><code>NANDLOG_VERSION_MAJOR</code> / <code>_MINOR</code></td><td>The library API. Independent of the format &mdash; no 1.x release has changed what is written to the part.</td></tr>
+      </tbody>
+    </table>
+    </div>

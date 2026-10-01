@@ -1,0 +1,350 @@
+/* nandlog documentation */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #5a6572;
+  --rule: #d8dee4;
+  --accent: #0b5fff;
+  --accent-soft: #e8f0ff;
+  --code-bg: #f6f8fa;
+  --code-fg: #1f2328;
+  --kbd: #eef1f4;
+  --warn-bg: #fff8e5;
+  --warn-rule: #e3b341;
+  --note-bg: #eef6ff;
+  --note-rule: #7aa7e8;
+  --sidebar: 15rem;
+  --measure: 46rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --rule: #2a313a;
+    --accent: #6ea8ff;
+    --accent-soft: #15223a;
+    --code-bg: #161b22;
+    --code-fg: #e6edf3;
+    --kbd: #21262d;
+    --warn-bg: #2a2214;
+    --warn-rule: #9e7718;
+    --note-bg: #10203a;
+    --note-rule: #2f5c9e;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d1117;
+  --fg: #e6edf3;
+  --muted: #9198a1;
+  --rule: #2a313a;
+  --accent: #6ea8ff;
+  --accent-soft: #15223a;
+  --code-bg: #161b22;
+  --code-fg: #e6edf3;
+  --kbd: #21262d;
+  --warn-bg: #2a2214;
+  --warn-rule: #9e7718;
+  --note-bg: #10203a;
+  --note-rule: #2f5c9e;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+.skip:focus {
+  left: 1rem; top: 1rem; z-index: 100;
+  background: var(--bg); color: var(--fg);
+  padding: .5rem .75rem; border: 2px solid var(--accent); border-radius: 6px;
+}
+
+/* ---- top bar ---- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .7rem 1rem;
+  border-bottom: 1px solid var(--rule);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 20;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: -.01em;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.ver {
+  font: 600 .75rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: .25rem .45rem;
+  border-radius: 999px;
+}
+
+.navbtn {
+  margin-left: auto;
+  cursor: pointer;
+  font-size: 1.3rem;
+  line-height: 1;
+  padding: .2rem .5rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  user-select: none;
+}
+
+.topbar .sidenav { display: none; }
+#navtoggle:checked ~ .sidenav {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  top: 100%; left: 0; right: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+  padding: .5rem 1rem 1rem;
+}
+
+/* ---- layout ---- */
+
+.layout {
+  display: flex;
+  gap: 2.5rem;
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.sidenav {
+  display: flex;
+  flex-direction: column;
+  gap: .1rem;
+  padding: 1.75rem 0;
+}
+
+.sidenav.desktop {
+  display: none;
+  width: var(--sidebar);
+  flex: 0 0 var(--sidebar);
+  position: sticky;
+  top: 3.5rem;
+  align-self: flex-start;
+  max-height: calc(100vh - 3.5rem);
+  overflow-y: auto;
+}
+
+.sidenav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: .35rem .6rem;
+  border-radius: 6px;
+  font-size: .94rem;
+}
+.sidenav a:hover { color: var(--fg); background: var(--code-bg); }
+.sidenav a.current { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+
+main {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 1.75rem 0 4rem;
+  max-width: var(--measure);
+}
+
+/* ---- typography ---- */
+
+h1, h2, h3, h4 { line-height: 1.25; letter-spacing: -.015em; }
+h1 { font-size: 2rem; margin: 0 0 .35rem; }
+h2 { font-size: 1.4rem; margin: 2.75rem 0 .85rem; padding-top: .6rem; border-top: 1px solid var(--rule); }
+h3 { font-size: 1.1rem; margin: 2rem 0 .6rem; }
+h4 { font-size: .97rem; margin: 1.5rem 0 .4rem; }
+
+.lede { font-size: 1.12rem; color: var(--muted); margin: 0 0 2rem; }
+
+p, ul, ol { margin: 0 0 1rem; }
+li { margin: .3rem 0; }
+a { color: var(--accent); }
+.muted { color: var(--muted); }
+strong { font-weight: 650; }
+
+/* ---- code ---- */
+
+code, kbd, pre, .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+code {
+  font-size: .875em;
+  background: var(--code-bg);
+  padding: .14em .36em;
+  border-radius: 4px;
+}
+
+pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: .9rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+  margin: 0 0 1.1rem;
+  border: 1px solid var(--rule);
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+
+kbd {
+  background: var(--kbd);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: .1em .4em;
+  font-size: .82em;
+}
+
+/* ---- tables ---- */
+
+.tablewrap { overflow-x: auto; margin: 0 0 1.25rem; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: .9rem;
+}
+th, td {
+  text-align: left;
+  padding: .5rem .7rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+th {
+  font-weight: 650;
+  border-bottom: 2px solid var(--rule);
+  white-space: nowrap;
+}
+td code { white-space: nowrap; }
+tbody tr:hover { background: var(--code-bg); }
+
+/* ---- callouts ---- */
+
+.note, .warn {
+  border-left: 4px solid var(--note-rule);
+  background: var(--note-bg);
+  padding: .8rem 1rem;
+  border-radius: 0 8px 8px 0;
+  margin: 0 0 1.25rem;
+}
+.warn { border-left-color: var(--warn-rule); background: var(--warn-bg); }
+.note > :last-child, .warn > :last-child { margin-bottom: 0; }
+.note p:first-child strong, .warn p:first-child strong { display: inline; }
+
+/* ---- api entries ---- */
+
+.fn {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  margin: 0 0 1rem;
+}
+.fn > pre {
+  margin: 0 0 .7rem;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: .88rem;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: pre-wrap;
+}
+.fn > p:last-child { margin-bottom: 0; }
+
+/* ---- cards on the index ---- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: .85rem;
+  margin: 0 0 1.5rem;
+}
+.card {
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: .95rem 1.1rem;
+  text-decoration: none;
+  color: var(--fg);
+  display: block;
+}
+.card:hover { border-color: var(--accent); background: var(--code-bg); }
+.card h3 { margin: 0 0 .25rem; font-size: 1rem; }
+.card p { margin: 0; font-size: .88rem; color: var(--muted); }
+
+footer {
+  margin-top: 3.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+  font-size: .87rem;
+  color: var(--muted);
+}
+footer p { margin: 0 0 .35rem; }
+
+@media (min-width: 60rem) {
+  .navbtn { display: none; }
+  .sidenav.desktop { display: flex; }
+  main { padding-top: 2.25rem; }
+}
+
+@media (max-width: 59.99rem) {
+  .layout { padding: 0 1rem; }
+}
+
+/* ---- figures ---- */
+
+figure {
+  margin: 0 0 1.5rem;
+}
+figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+figcaption {
+  font-size: .85rem;
+  color: var(--muted);
+  margin-top: .5rem;
+  text-align: left;
+}
+figcaption b { color: var(--fg); font-weight: 600; }
+
+/* SVG theming: shapes inherit the page palette rather than hard-coded colours */
+.dia { --d-line: var(--rule); --d-fill: var(--code-bg); --d-text: var(--fg);
+       --d-mute: var(--muted); --d-accent: var(--accent); --d-accent-soft: var(--accent-soft); }
+.dia text { fill: var(--d-text); font-family: inherit; font-size: 13px; }
+.dia text.sm { font-size: 11px; fill: var(--d-mute); }
+.dia text.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.dia text.hd { font-weight: 650; }
+.dia rect.box { fill: var(--d-fill); stroke: var(--d-line); stroke-width: 1; }
+.dia rect.accent { fill: var(--d-accent-soft); stroke: var(--d-accent); stroke-width: 1; }
+.dia line, .dia path { stroke: var(--d-line); fill: none; stroke-width: 1; }
+.dia line.seam { stroke: var(--d-accent); stroke-dasharray: 5 3; }
+.dia rect.bar { fill: var(--d-accent); }
+.dia rect.bar2 { fill: var(--d-mute); }

@@ -1,0 +1,96 @@
+<!-- title: Upgrading | desc: What changed in nandlog 1.2, and what you have to edit. -->
+    <h1>Upgrading</h1>
+    <p class="lede">What changed in 1.2, and what it costs you.</p>
+
+    <div class="note">
+      <p><strong>The on-flash format has not changed.</strong> A log written by any 1.x release parses with any
+         other, and there is no migration on the part. What changed is the spelling of the API.</p>
+    </div>
+
+    <h2>Renamed</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Was</th><th>Now</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog_port_spi_read()</code></td><td><code>nandlog_port_transfer_read()</code></td><td rowspan="2">The seam is command&ndash;address&ndash;data, which is not specific to SPI</td></tr>
+        <tr><td><code>nandlog_port_spi_write()</code></td><td><code>nandlog_port_transfer_write()</code></td></tr>
+        <tr><td><code>nandlog_store_metadata()</code></td><td><code>nandlog_begin_epoch()</code></td><td>Beginning an epoch is the main effect; storing the details is what it does on the way</td></tr>
+        <tr><td><code>nandlog_retrieve_metadata()</code></td><td><code>nandlog_retrieve_epoch_details()</code></td><td>It returns the caller's details, not the log's metadata</td></tr>
+        <tr><td><code>nandlog_enter_maintenance_mode()</code></td><td><code>nandlog_begin_session()</code></td><td rowspan="2">It is a scope, not a mode, and nothing is out of service during one</td></tr>
+        <tr><td><code>nandlog_exit_maintenance_mode()</code></td><td><code>nandlog_end_session()</code></td></tr>
+        <tr><td><code>NANDLOG_MAX_METADATA_BYTES</code></td><td><code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code></td><td>It bounds the caller's blob, not the ring</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Required additions</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>What</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td><code>NANDLOG_CHIP_PAGE_COPY</code></td><td><code>nandlog_conf.h</code> must define it. Default 1.</td></tr>
+        <tr><td><code>nandlog_chip_read_page_region()</code></td><td>Every chip driver. It is <code>nandlog_chip_read_page()</code> over part of a page, and must issue a real column address.</td></tr>
+        <tr><td><code>nandlog_chip_copy_page()</code></td><td>Every chip driver &mdash; or expand <code>NANDLOG_CHIP_NO_INTERNAL_PAGE_COPY</code> instead.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>What each kind of file needs</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>File</th><th>Work</th></tr></thead>
+      <tbody>
+        <tr><td>Your <code>nandlog_port.c</code></td><td>Two function renames. Nothing else.</td></tr>
+        <tr><td>Your chip driver, if you wrote one</td><td>Two new functions, plus the port renames inside it.</td></tr>
+        <tr><td>Your <code>nandlog_conf.h</code></td><td>One new macro, one renamed macro.</td></tr>
+        <tr><td>Your application</td><td>Four API renames.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>A mechanical rename handles all of it:</p>
+
+<pre><code>grep -rl 'nandlog_port_spi_\|nandlog_store_metadata\|nandlog_retrieve_metadata\|maintenance_mode\|NANDLOG_MAX_METADATA_BYTES' . \
+  | xargs sed -i '' \
+      -e 's/nandlog_port_spi_read/nandlog_port_transfer_read/g' \
+      -e 's/nandlog_port_spi_write/nandlog_port_transfer_write/g' \
+      -e 's/nandlog_store_metadata/nandlog_begin_epoch/g' \
+      -e 's/nandlog_retrieve_metadata/nandlog_retrieve_epoch_details/g' \
+      -e 's/nandlog_enter_maintenance_mode/nandlog_begin_session/g' \
+      -e 's/nandlog_exit_maintenance_mode/nandlog_end_session/g' \
+      -e 's/NANDLOG_MAX_METADATA_BYTES/NANDLOG_MAX_EPOCH_DETAILS_BYTES/g'</code></pre>
+
+    <h2>New</h2>
+
+    <ul>
+      <li><a href="api.html">Reading an earlier epoch</a> &mdash; <code>nandlog_epoch_count()</code>,
+          <code>nandlog_epoch_info()</code>, <code>nandlog_select_epoch()</code>,
+          <code>nandlog_select_current_epoch()</code>.</li>
+      <li>Chip-internal page relocation, which keeps a relocated page off the bus entirely.</li>
+      <li>Partial page reads throughout the library, cutting bus traffic on boot and on a bounded download
+          by roughly two orders of magnitude. See <a href="performance.html">Performance</a>.</li>
+      <li>Version macros: <code>NANDLOG_VERSION_MAJOR</code>, <code>NANDLOG_VERSION_MINOR</code>,
+          <code>NANDLOG_VERSION_AT_LEAST()</code>.</li>
+    </ul>
+
+    <h2>Behaviour changes</h2>
+
+    <ul>
+      <li><code>NANDLOG_HAS_HARDWARE</code> no longer consults any application-specific macro. A build that
+          wants the no-op stand-ins must define it as 0 explicitly.</li>
+      <li>Retiring a block is idempotent in both supplied drivers.</li>
+      <li>An erase will never be issued to a block the driver already considers bad.</li>
+    </ul>
+
+    <h2>Guarding against the next change</h2>
+
+<pre><code>#if (NANDLOG_VERSION_MAJOR != 1)
+#error "This application understands nandlog 1.x only"
+#endif
+
+#if NANDLOG_VERSION_AT_LEAST(1, 2)
+   /* nandlog_select_epoch() and nandlog_bad_block_count() exist */
+#endif</code></pre>

@@ -1,0 +1,188 @@
+<!-- title: Getting Started | desc: Install nandlog, configure it for your part, port it to your platform, and write and read your first records. -->
+    <h1>Getting Started</h1>
+    <p class="lede">Install, configure, port, and run.</p>
+
+    <h2>1. Install</h2>
+
+<pre><code>git submodule add https://github.com/hedgetechllc/nandlog.git external/nandlog</code></pre>
+
+    <p>There is no build system and nothing to install. Add three source files to your build:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>File</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog.c</code></td><td>Always.</td></tr>
+        <tr><td><code>chips/nandlog_chip_&lt;PART&gt;.c</code></td><td>Exactly one, for the part you have fitted.</td></tr>
+        <tr><td>your <code>nandlog_port.c</code></td><td>Copy the template from the repository root and fill in the stubs.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Put the repository root and <code>chips/</code> on the include path.</p>
+
+    <div class="warn">
+      <p><strong>Build with <code>-fno-strict-aliasing</code>.</strong> This is required, not advisory. The
+         log reads page and metadata headers out of byte buffers by pointer cast, which an optimiser is
+         otherwise entitled to reason around. It costs nothing measurable. <code>-O2</code> is otherwise
+         fine and worth having.</p>
+    </div>
+
+    <h2>2. Configure</h2>
+
+    <p>Edit <code>nandlog_conf.h</code>. Nothing is derived and nothing has a silent default &mdash; anything
+       missing is a named compile error.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>NANDLOG_HAS_HARDWARE</code></td><td>1</td><td>Set to 0 to compile the library to no-op stand-ins that accept everything and return nothing, so the application above needs no conditionals of its own.</td></tr>
+        <tr><td><code>NANDLOG_MAX_PAGE_SIZE_BYTES</code></td><td>4096</td><td>The largest page you are prepared to spend RAM on. Every buffer is sized from this.</td></tr>
+        <tr><td><code>NANDLOG_MAX_SPARE_SIZE_BYTES</code></td><td>256</td><td>The same for the spare area.</td></tr>
+        <tr><td><code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code></td><td>3</td><td>Program or erase attempts on one block before it is retired.</td></tr>
+        <tr><td><code>NANDLOG_ERASE_AHEAD_BLOCKS</code></td><td>2</td><td>Blocks kept erased ahead of the write head, so a page write never waits on an erase.</td></tr>
+        <tr><td><code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code></td><td>3</td><td>Blocks a single page write may relocate through before the log concludes the part will not hold it.</td></tr>
+        <tr><td><code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code></td><td>512</td><td>Largest caller-defined blob stored with each epoch.</td></tr>
+        <tr><td><code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code></td><td>250</td><td>How far a timestamp may step backwards before the log treats it as the time base having moved rather than two writers disagreeing.</td></tr>
+        <tr><td><code>NANDLOG_RECORD_FRAMING</code></td><td>1</td><td>Whether each record carries its own length, so a reader can walk a page without knowing your record types.</td></tr>
+        <tr><td><code>NANDLOG_BUSY_POLL_INTERVAL_US</code></td><td>10</td><td>How often to poll the part's BUSY bit.</td></tr>
+        <tr><td><code>NANDLOG_BUSY_TIMEOUT_MS</code></td><td>500</td><td>How long to poll before declaring the part dead.</td></tr>
+        <tr><td><code>NANDLOG_CHIP_PAGE_COPY</code></td><td>1</td><td>Whether a relocated page may be moved inside the chip instead of across the bus.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Setting the two <code>MAX_</code> values larger than your part needs costs only unused RAM. A part
+       whose page exceeds the budget is a compile error inside that part's driver.</p>
+
+    <h2>3. Port</h2>
+
+    <p>Copy <code>nandlog_port.c</code> from the repository root into your own tree, delete its
+       <code>#error</code> line, and implement thirteen functions. Each stub documents what the layer above
+       assumes of it. See <a href="porting.html">Porting</a> for the detail and a complete worked example.</p>
+
+    <h2>4. Bring the log up</h2>
+
+<pre><code>#include "nandlog.h"
+
+if (!nandlog_init())
+{
+   /* No part fitted, or the port would not open. No other call should be made. */
+   return;
+}</code></pre>
+
+    <p><code>nandlog_init()</code> opens the port, identifies the part, loads its bad-block table, recovers
+       the current epoch and locates the write head. It is safe to call more than once.
+       <code>nandlog_probe()</code> is the cheaper question for a build that only wants to know whether a
+       part is present.</p>
+
+    <h2>5. Start an epoch</h2>
+
+    <p>An <strong>epoch</strong> is one generation of the log, with its own sequence numbering from zero.
+       Reads cover one epoch at a time. Starting a new one makes everything logged previously unreachable
+       through the API, though it stays on the part until the write head sweeps over it.</p>
+
+<pre><code>nandlog_begin_session();
+nandlog_begin_epoch(&amp;experiment_details, sizeof(experiment_details));
+nandlog_end_session();</code></pre>
+
+    <p>A <strong>session</strong> holds the part powered across a run of operations instead of waking and
+       sleeping it around each one. Epoch operations and reads require one; ordinary logging does not.
+       Sessions do not nest.</p>
+
+    <p>The details blob is opaque &mdash; the log stores it, checksums it, and hands it back, but never looks
+       inside.</p>
+
+    <h2>6. Log records</h2>
+
+<pre><code>nandlog_store_record(RECORD_SAMPLE, milliseconds, &amp;sample, sizeof(sample));</code></pre>
+
+    <p><code>record_type</code> and the data are opaque. The timestamp is only ever compared, never
+       interpreted, so its epoch and units are yours.</p>
+
+    <p>This call is cheap but not free every time: a page is committed as soon as the next record will not
+       fit, so it occasionally writes to flash. Records are never split across pages, and one larger than a
+       page is dropped rather than corrupting the stream. <code>nandlog_data_bytes_per_page()</code> is how
+       much a page holds on the fitted part.</p>
+
+    <p>A partial page only reaches flash when you ask for it:</p>
+
+<pre><code>nandlog_flush(true);                       /* commit whatever is buffered  */
+if (nandlog_has_buffered_data()) { ... }   /* anything unwritten in RAM?   */</code></pre>
+
+    <div class="note">
+      <p><strong>Call <code>nandlog_flush(true)</code> on a timer and at shutdown.</strong> Without it, up to
+         one page of recent records sits in RAM and is lost to an unexpected reboot.</p>
+    </div>
+
+    <h2>7. Read it back</h2>
+
+<pre><code>uint8_t page[NANDLOG_MAX_DATA_BYTES_PER_PAGE];
+uint32_t num_pages = 0, num_bytes = 0;
+
+nandlog_begin_session();
+nandlog_begin_reading(start_ms, end_ms);     /* 0 for either bound means "no bound" */
+nandlog_read_span(&amp;num_pages, &amp;num_bytes);
+
+for (uint32_t i = 0; i &lt; num_pages; ++i)
+{
+   nandlog_page_header_t header;
+   const uint32_t length = nandlog_retrieve_next_page(page, &amp;header);
+   if (length == 0)
+   {
+      /* Unreadable page. This is a gap, not the end of the read:
+         header.seq still identifies which page it was. */
+   }
+}
+
+nandlog_end_reading();
+nandlog_end_session();                       /* also ends any open read */</code></pre>
+
+    <p>Writing is refused while a read is open. Both time bounds are resolved inside
+       <code>nandlog_begin_reading()</code>, and both err outward &mdash; a little extra data for you to
+       filter, rather than dropping data that was asked for.</p>
+
+    <div class="note">
+      <p><strong><code>nandlog_read_span()</code> costs a read of every page in the span when you ask for an
+         exact byte total.</strong> That doubles the flash traffic of a download. Pass <code>NULL</code> for
+         <code>num_bytes</code> unless you need the figure exactly &mdash; the page count alone is
+         arithmetic and free.</p>
+    </div>
+
+    <h3>Walking the records in a page</h3>
+
+    <p>With <code>NANDLOG_RECORD_FRAMING</code> on, a payload can be walked without knowing your record
+       types:</p>
+
+<pre><code>uint32_t offset = 0, record_bytes = 0;
+const uint8_t *record = NULL;
+
+while (nandlog_framed_next_record(payload, length, &amp;offset, &amp;record, &amp;record_bytes))
+{
+   const uint8_t  type = record[0];
+   uint32_t timestamp;  memcpy(&amp;timestamp, record + 1, sizeof(timestamp));
+   const uint8_t *data = record + 5;
+   const uint32_t data_length = record_bytes - 5;
+}</code></pre>
+
+    <h2>8. Check your work</h2>
+
+    <p>Dump an image from the device and run it through the reference parser, which verifies every CRC
+       independently of the device that wrote it:</p>
+
+<pre><code>./tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
+./tools/nandlog_parse.py stream offload.bin --json</code></pre>
+
+    <p>And run the host test suite, which exercises the real log and chip driver against an emulated part:</p>
+
+<pre><code>cd sim &amp;&amp; make</code></pre>
+
+    <h2>Next steps</h2>
+
+    <ul>
+      <li><a href="api.html">API Reference</a> &mdash; every function in detail, including retransmission and reading earlier epochs.</li>
+      <li><a href="porting.html">Porting</a> &mdash; the thirteen port functions, with a worked example.</li>
+      <li><a href="performance.html">Performance</a> &mdash; what each operation costs, measured.</li>
+      <li><a href="format.html">On-Flash Format</a> &mdash; page, metadata, and wire layouts.</li>
+    </ul>

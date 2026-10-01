@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Reference &middot; nandlog</title>
+<meta name="description" content="Every nandlog function, grouped by what it does, with signatures, return values and usage notes.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128190;</text></svg>">
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="index.html">nandlog</a>
+  <span class="ver">v1.2</span>
+  <input type="checkbox" id="navtoggle" hidden>
+  <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
+  <nav class="sidenav">
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="api.html" class="current" aria-current="page">API Reference</a>
+    <a href="porting.html">Porting</a>
+    <a href="chips.html">Chip Drivers</a>
+    <a href="format.html">On-Flash Format</a>
+    <a href="performance.html">Performance</a>
+    <a href="testing.html">Testing</a>
+    <a href="upgrading.html">Upgrading</a>
+  </nav>
+</header>
+<div class="layout">
+  <nav class="sidenav desktop">
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="api.html" class="current" aria-current="page">API Reference</a>
+    <a href="porting.html">Porting</a>
+    <a href="chips.html">Chip Drivers</a>
+    <a href="format.html">On-Flash Format</a>
+    <a href="performance.html">Performance</a>
+    <a href="testing.html">Testing</a>
+    <a href="upgrading.html">Upgrading</a>
+  </nav>
+  <main id="content">
+<h1>API Reference</h1>
+    <p class="lede">Everything in <code>nandlog.h</code>. Include that one header.</p>
+
+    <p>Every public function takes an internal lock for its whole duration, so a caller never holds one and
+       calls never nest. All of them are safe to call from any thread provided
+       <a href="porting.html">your port supplies a real mutex</a>.</p>
+
+    <h2>Lifecycle</h2>
+
+    <div class="fn">
+      <pre>bool nandlog_probe(void);</pre>
+      <p>Confirm a part is present and answering, without bringing the log up or writing anything. Intended
+         for builds that only test for its presence; <code>nandlog_init()</code> performs the same check for
+         itself.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_init(void);</pre>
+      <p>Bring the log up: open the port, identify the part, load its bad-block table, recover the current
+         epoch from the metadata ring, and locate the write head within it. Safe to call more than once.</p>
+      <p><strong>Returns</strong> false if the port could not be opened or the part did not answer. No other
+         call should be made in that case.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_deinit(void);</pre>
+      <p>Release the port. The log can be brought back up with <code>nandlog_init()</code>.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_disable(bool disable);</pre>
+      <p>Stop or resume accepting records. A disabled log discards what it is given rather than buffering it,
+         and still serves reads. Nothing is disabled by <code>nandlog_init()</code>.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_data_bytes_per_page(void);</pre>
+      <p>Payload bytes a page can carry on the fitted part: the page size less the header the log writes into
+         it. Answered from the chip driver, so it is correct before <code>nandlog_init()</code> has run.</p>
+    </div>
+
+    <h2>Sessions</h2>
+
+    <p>A session holds the part powered across a run of operations instead of waking and sleeping it around
+       each one. Epoch operations and reads require one; ordinary logging does not. Sessions do not nest.</p>
+
+    <div class="fn">
+      <pre>void nandlog_begin_session(void);
+void nandlog_end_session(void);</pre>
+      <p>Open and close a session. Ending one implies <code>nandlog_end_reading()</code> and returns the read
+         view to the current epoch.</p>
+    </div>
+
+    <h2>Epochs</h2>
+
+    <p>An epoch is one generation of the log: a numbered run with its own start page and its own sequence
+       numbering from zero. Reads cover one epoch at a time.</p>
+
+    <div class="fn">
+      <pre>bool nandlog_begin_epoch(const void *blob, uint16_t length);</pre>
+      <p>Begin a new epoch, described by an opaque caller-defined blob of at most
+         <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>. The log neither reads nor interprets the blob.
+         Everything logged previously stays on the part but stops being reachable through
+         <code>nandlog_begin_reading()</code>, since reads cover the current epoch unless told otherwise.</p>
+      <p><strong>Requires a session.</strong> Returns false if there is no session, if the blob is too large,
+         or if no slot in the metadata ring would take it.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_retrieve_epoch_details(void *blob, uint16_t length);</pre>
+      <p>Copy back the details of whichever epoch is selected, truncated to <code>length</code>. Zero-fills if
+         there are none, so a caller that never stored any reads zeros rather than stale bytes.</p>
+    </div>
+
+    <h3>Reading an earlier epoch</h3>
+
+    <div class="warn">
+      <p><strong>An earlier epoch is not preserved, only left alone.</strong> The write head sweeps forward
+         from where the previous generation stopped and erases each block just before it needs it, so an
+         epoch is eaten from its start as the current one grows. What comes back is whatever is left; a page
+         that has been swept over reads as a gap exactly like one that rotted.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_epoch_count(void);</pre>
+      <p>How many epochs the metadata ring still describes, the current one included, capped at
+         <code>NANDLOG_MAX_LISTED_EPOCHS</code> (16). Costs one pass over the ring, reading a header per
+         slot. Nothing is cached between calls.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_epoch_info(uint32_t index, nandlog_epoch_info_t *info);</pre>
+      <p>Describe the <code>index</code>-th epoch, newest first, so index 0 is always the current one. Returns
+         false once the index runs past what the ring describes.</p>
+<pre><code>typedef struct
+{
+   uint32_t epoch;               /* the generation number                        */
+   uint32_t created_timestamp;   /* whatever the caller stamped                  */
+   uint32_t first_page;          /* physical page its sequence 0 was written to  */
+   uint16_t details_length;      /* bytes of caller-defined details in its slot  */
+   bool     is_current;          /* whether this is the epoch being written now  */
+} nandlog_epoch_info_t;</code></pre>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_select_epoch(uint32_t epoch);
+void nandlog_select_current_epoch(void);</pre>
+      <p>Point reads at an epoch other than the one being written, and back again. <strong>Writing is refused
+         while an earlier epoch is selected</strong>, so a download cannot be mistaken for somewhere to put
+         data.</p>
+      <p><code>nandlog_select_epoch()</code> requires a session, fails while a read is open, and returns false
+         if no slot in the ring names that epoch. Ending the session also returns to the current epoch.</p>
+      <p>A read that yields nothing means the epoch has been overwritten, not that it never existed &mdash;
+         compare against <code>nandlog_epoch_info()</code>, which still describes it from the ring.</p>
+    </div>
+
+<pre><code>nandlog_begin_session();
+
+for (uint32_t i = 0; i &lt; nandlog_epoch_count(); ++i)
+{
+   nandlog_epoch_info_t info;
+   if (nandlog_epoch_info(i, &amp;info))
+      printf("epoch %u%s\n", info.epoch, info.is_current ? " (current)" : "");
+}
+
+if (nandlog_select_epoch(previous))
+{
+   nandlog_retrieve_epoch_details(&amp;details, sizeof(details));
+   nandlog_begin_reading(0, 0);
+   /* ... the usual read loop ... */
+   nandlog_end_reading();
+}
+
+nandlog_end_session();</code></pre>
+
+    <h2>Writing</h2>
+
+    <div class="fn">
+      <pre>void nandlog_store_record(uint8_t record_type, uint32_t timestamp,
+                          const void *data, uint32_t data_length);</pre>
+      <p>Append one record to the page being assembled in RAM. <code>record_type</code> and
+         <code>data</code> are opaque to the log; the timestamp is only ever compared, never interpreted, so
+         its epoch and units are yours.</p>
+      <p>Committing a full page happens here, so this call occasionally writes to flash. Records are never
+         split across pages, and <strong>one larger than a page is dropped</strong> &mdash; check
+         <code>nandlog_data_bytes_per_page()</code> if your records are large.</p>
+      <p>With <code>NANDLOG_RECORD_FRAMING</code> on, the record is prefixed with its own data length,
+         costing two bytes.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_flush(bool write_partial_pages);</pre>
+      <p>Commit what is buffered. A page is written automatically as soon as the next record will not fit, so
+         this is only needed to force out a partial page &mdash; a timed flush, or shutdown. Pass false to
+         write only if a whole page has accumulated.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_has_buffered_data(void);</pre>
+      <p>Whether any records are sitting unwritten in RAM.</p>
+    </div>
+
+    <h2>Reading</h2>
+
+    <div class="fn">
+      <pre>void nandlog_begin_reading(uint32_t starting_timestamp, uint32_t ending_timestamp);</pre>
+      <p>Open a read over the selected epoch, bounded by timestamp. Zero for either bound means "from the
+         beginning" and "to the end"; both bounds are resolved here, so nothing downstream has to seek
+         again. Both err outward &mdash; a little extra data to filter beats dropping data that was asked
+         for.</p>
+      <p><strong>Requires a session.</strong> While a read is open, writing is refused.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_end_reading(void);</pre>
+      <p>Close a read, whether or not it ran to completion. Implied by <code>nandlog_end_session()</code>.</p>
+    </div>
+
+    <div class="fn">
+      <pre>void nandlog_read_span(uint32_t *num_pages, uint32_t *num_bytes);</pre>
+      <p>Measure the open read: how many pages it will yield, including any that turn out to be unreadable,
+         and how many payload bytes they hold. Either pointer may be <code>NULL</code>. Reports zero for
+         both if no read is open.</p>
+      <p>The byte total is exact in both directions &mdash; it verifies payload CRCs as well as headers, so a
+         page with a sound header and a rotted payload is not counted and then not delivered. A host sizing
+         a receive buffer depends on that.</p>
+      <p><strong>The byte total costs a read of every page in the span</strong>, doubling the flash traffic
+         of a download. Pass <code>NULL</code> unless the figure is needed exactly; the page count is
+         arithmetic.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_retrieve_next_page(uint8_t *buffer, nandlog_page_header_t *header);</pre>
+      <p>Take the next page of the open read, returning its payload length. Pass <code>NULL</code> for
+         <code>header</code> to ignore the framing metadata.</p>
+      <p><strong>Zero means that page was unreadable, which is not the end of the read.</strong> A page whose
+         header could not be read comes back with <code>seq</code> set to its position, so the gap is still
+         identifiable.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_retrieve_page_by_seq(uint32_t seq, uint8_t *buffer,
+                                     nandlog_page_header_t *header);</pre>
+      <p>Fetch one page of the selected epoch by its sequence number, so a host can re-request what it lost.
+         Returns zero, with the header describing the gap, if that page cannot be produced.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_read_recent_page(uint32_t pages_back, uint8_t *buffer,
+                                  nandlog_page_header_t *header, bool *end_of_epoch);</pre>
+      <p>Walk backwards from the write head, newest page first, independently of any open read and without
+         needing a session. Zero means that page could not be read, which is not the end of the log;
+         <code>end_of_epoch</code> is the signal to stop.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_framed_next_record(const uint8_t *payload, uint32_t length, uint32_t *offset,
+                                const uint8_t **record, uint32_t *record_bytes);</pre>
+      <p>Step through the records of a payload belonging to a page that announced
+         <code>NANDLOG_PAGE_MAGIC_FRAMED</code>. Initialise <code>*offset</code> to zero and call until it
+         returns false. <code>*record</code> points at
+         <code>[type:1][timestamp:4][data]</code>.</p>
+    </div>
+
+    <h2>Retransmission</h2>
+
+    <p>Sequence numbers are contiguous within an epoch, so a host knows exactly which pages it is missing.</p>
+
+    <div class="fn">
+      <pre>void nandlog_retransmit_clear(void);
+uint32_t nandlog_retransmit_add(const uint32_t *seqs, uint32_t count);
+uint32_t nandlog_retransmit_count(void);</pre>
+      <p>Accumulate the sequence numbers a host reports missing, across as many calls as it takes.
+         <code>nandlog_retransmit_add()</code> returns the number held; anything beyond
+         <code>NANDLOG_MAX_RETRANSMIT_PAGES</code> (256) is dropped.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_retransmit_total_bytes(void);</pre>
+      <p>Exact total of the payload bytes the requested pages will deliver, for a host sizing a receive
+         buffer. Costs a read of each requested page.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_retrieve_retransmit_page(uint32_t index, uint8_t *buffer,
+                                          nandlog_page_header_t *header);</pre>
+      <p>Serve the <code>index</code>-th requested page. An index past the end yields a zero-length page
+         rather than nothing, so the host can tell "still missing" from "never answered".</p>
+    </div>
+
+    <h2>Diagnostics</h2>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_bad_block_count(void);</pre>
+      <p>How many blocks across the metadata ring and the log region are retired, factory-marked and grown
+         alike. Answers from RAM: the figure is recomputed when the log comes up and whenever a block is
+         retired, so reading it is free.</p>
+      <p>Useful as a health indicator over a part's life. A count that climbs steadily is a part approaching
+         the end of its endurance; a count that jumps is worth investigating.</p>
+    </div>
+
+    <h2>Recovery</h2>
+
+    <div class="fn">
+      <pre>void nandlog_reset_bad_block_table(void);</pre>
+      <p>Discard the persisted bad-block table so it is rebuilt from the factory markers on the next boot.
+         What this can achieve depends on the part: one that remaps in hardware cannot forget. The outcome
+         is reported through <code>nandlog_port_log()</code>.</p>
+    </div>
+
+    <h2>Version macros</h2>
+
+<pre><code>#define NANDLOG_VERSION_MAJOR    1
+#define NANDLOG_VERSION_MINOR    2
+
+#define NANDLOG_VERSION_AT_LEAST(major, minor)   /* ... */</code></pre>
+
+    <p>Major changes when something you built against must change &mdash; a structure that moves on flash or
+       on the wire, a function that is renamed or whose meaning shifts. Minor changes for additions.
+       <code>NANDLOG_FORMAT_VERSION</code> is separate and versions the record grammar a particular build
+       writes; see <a href="format.html">On-Flash Format</a>.</p>
+
+    <footer>
+      <p>nandlog is MIT-licensed. <a href="https://github.com/hedgetechllc/nandlog">Source on GitHub</a>.</p>
+      <p class="muted">Design rationale, trade-offs and field results are covered in the whitepaper
+         <em>(arXiv link to follow)</em>.</p>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

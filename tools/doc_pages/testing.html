@@ -1,0 +1,95 @@
+<!-- title: Testing | desc: The nandlog host simulator and the three on-device test applications, and what each can and cannot prove. -->
+    <h1>Testing</h1>
+    <p class="lede">A host simulator for everything above the wire, and three device applications for everything at it.</p>
+
+    <h2>Host simulator</h2>
+
+<pre><code>cd sim &amp;&amp; make</code></pre>
+
+    <p>Builds and runs three configurations &mdash; record framing off, framing on, and framing on with
+       internal page copy disabled &mdash; under AddressSanitizer and UndefinedBehaviorSanitizer. The whole
+       suite takes milliseconds.</p>
+
+    <p>The porting seam is at the SPI command level, so <code>sim/nandlog_port_sim.c</code> emulates a NAND
+       part rather than stubbing out a log: the real chip driver runs on it unmodified, and addressing,
+       status-register handshakes, busy-waiting, the cache register and bad-block bookkeeping are all
+       shipping code under test. The emulated part is built from whatever geometry the compiled driver
+       reports, so the two cannot disagree.</p>
+
+    <p>NAND semantics are honoured rather than approximated: erase sets bits, programming may only clear
+       them, a program cut short leaves exactly the prefix that made it, and a page read fills the chip's
+       one cache register.</p>
+
+    <h3>What it injects</h3>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Fault</th><th>Control</th></tr></thead>
+      <tbody>
+        <tr><td>Blocks that always refuse a program</td><td><code>faults.unwritable_blocks</code></td></tr>
+        <tr><td>Blocks that always refuse an erase</td><td><code>faults.unerasable_blocks</code></td></tr>
+        <tr><td>Power lost mid-program or mid-erase</td><td><code>nandlog_sim_power_fail_after()</code></td></tr>
+        <tr><td>Bit rot in place</td><td><code>nandlog_sim_corrupt()</code></td></tr>
+        <tr><td>A part that never clears BUSY</td><td><code>faults.stay_busy</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>It can also dump a byte-for-byte image of the emulated part, so the reference parser can be run
+       against something a device would actually have produced.</p>
+
+    <h3>What it covers</h3>
+
+    <p>Round trip; a record sized to fill a page exactly; epoch details; write-head recovery across a reboot;
+       factory bad-block markers in the spare area; block retirement; relocation without bus traffic; listing
+       and reading an earlier epoch; a torn page; a rotted payload; a disabled log; reads refused outside a
+       session; the busy timeout ending in <code>nandlog_port_fatal()</code>; and a date-limited read across
+       a backward time step.</p>
+
+    <h2>On-device tests</h2>
+
+    <p>Three applications in <code>tests/</code>, for the questions a simulator cannot answer: what the real
+       part does with a command the simulator only pretends to implement, what its on-die ECC does to bytes
+       the log wants to read or write, and how long any of it takes.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Test</th><th>Gates</th><th>Writes to the part</th></tr></thead>
+      <tbody>
+        <tr><td><code>test_nandlog_partial_read.c</code></td><td>Column-addressed and short page reads</td><td>One scratch page</td></tr>
+        <tr><td><code>test_nandlog_page_copy.c</code></td><td><code>nandlog_chip_copy_page()</code></td><td>Three scratch blocks</td></tr>
+        <tr><td><code>test_nandlog_ecc_marker.c</code></td><td>Whether a bad-block marker can be written into the spare area at all</td><td>Four scratch blocks</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>All three work only in the top blocks of the reserve, which the log never places a page in, and skip
+       any block already retired. None touches the log region, the metadata ring, or the chip driver's
+       bad-block marker page. They are still write tests: run them on a development board.</p>
+
+    <div class="warn">
+      <p><strong>Run the read test before deploying a new chip driver.</strong> A wrong column byte order
+         does not fail loudly &mdash; it reads <code>0xFF</code> from the wrong place, the factory bad-block
+         scan concludes every block is good, and nothing is retired. The simulator cannot catch it, because
+         it decodes the column address the same way the driver encodes it.</p>
+    </div>
+
+    <p>Each test prints its own pass/fail verdict and a timing table. <code>tests/README.md</code> has the
+       build instructions and what each result means.</p>
+
+    <h2>The reference parser</h2>
+
+<pre><code>./tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
+./tools/nandlog_parse.py stream offload.bin --json</code></pre>
+
+    <p>An independent implementation of the <a href="format.html">on-flash and wire formats</a>, written
+       separately from the library that produces them. The device computes CRC-32 with the IEEE&nbsp;802.3
+       polynomial precisely so the parser can verify it with <code>zlib.crc32</code> and nothing bespoke.</p>
+
+    <p>Use it to check a device's output end to end: if the parser and the device ever disagree, one of them
+       is wrong.</p>
+
+    <h2>What host tests cannot tell you</h2>
+
+    <p>Nothing about the real part's timing, its ECC, or the board. Those need the device tests above, plus a
+       deployment.</p>

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview &middot; nandlog</title>
+<meta name="description" content="Append-only, power-fail-safe, CRC-validated logging on raw SPI NAND for embedded devices. No flash translation layer, no filesystem, no heap.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128190;</text></svg>">
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="index.html">nandlog</a>
+  <span class="ver">v1.2</span>
+  <input type="checkbox" id="navtoggle" hidden>
+  <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
+  <nav class="sidenav">
+    <a href="index.html" class="current" aria-current="page">Overview</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="api.html">API Reference</a>
+    <a href="porting.html">Porting</a>
+    <a href="chips.html">Chip Drivers</a>
+    <a href="format.html">On-Flash Format</a>
+    <a href="performance.html">Performance</a>
+    <a href="testing.html">Testing</a>
+    <a href="upgrading.html">Upgrading</a>
+  </nav>
+</header>
+<div class="layout">
+  <nav class="sidenav desktop">
+    <a href="index.html" class="current" aria-current="page">Overview</a>
+    <a href="getting-started.html">Getting Started</a>
+    <a href="api.html">API Reference</a>
+    <a href="porting.html">Porting</a>
+    <a href="chips.html">Chip Drivers</a>
+    <a href="format.html">On-Flash Format</a>
+    <a href="performance.html">Performance</a>
+    <a href="testing.html">Testing</a>
+    <a href="upgrading.html">Upgrading</a>
+  </nav>
+  <main id="content">
+<h1>nandlog</h1>
+    <p class="lede">Append-only, power-fail-safe, CRC-validated logging on raw SPI NAND.
+       No flash translation layer, no filesystem, no heap.</p>
+
+    <p>nandlog is a C99 library for devices that collect data for weeks and hand it over in one go &mdash; a
+       battery-powered sensor, a tag, a logger. It assumes writes are small and frequent, reads are rare and
+       bulk, and power can be lost at any instant without warning.</p>
+
+    <div class="cards">
+      <a class="card" href="getting-started.html">
+        <h3>Getting Started &rarr;</h3>
+        <p>Install, configure, and write your first record.</p>
+      </a>
+      <a class="card" href="api.html">
+        <h3>API Reference &rarr;</h3>
+        <p>Every function, grouped by what it does.</p>
+      </a>
+      <a class="card" href="porting.html">
+        <h3>Porting &rarr;</h3>
+        <p>The thirteen functions you write, with a worked example.</p>
+      </a>
+      <a class="card" href="chips.html">
+        <h3>Chip Drivers &rarr;</h3>
+        <p>Adding support for a part that is not already included.</p>
+      </a>
+    </div>
+
+    <figure>
+      <svg class="dia" viewBox="0 0 640 310" role="img" aria-label="Four layers separated by three interfaces: the application, the log core, one chip driver per part, and the port you write.">
+        <rect class="box" x="60" y="8"   width="520" height="34" rx="4"/>
+        <text x="320" y="30" text-anchor="middle" class="hd">application</text>
+
+        <line class="seam" x1="20" y1="54" x2="620" y2="54"/>
+        <text x="24" y="50" class="mono" style="fill:var(--d-accent)">nandlog.h</text>
+        <text x="616" y="50" text-anchor="end" class="sm">records in, pages out</text>
+
+        <rect class="accent" x="60" y="64" width="520" height="52" rx="4"/>
+        <text x="320" y="85"  text-anchor="middle" class="hd">nandlog.c &mdash; the log core</text>
+        <text x="320" y="104" text-anchor="middle" class="sm">framing, CRCs, epochs, the write head, bad-block policy</text>
+
+        <line class="seam" x1="20" y1="128" x2="620" y2="128"/>
+        <text x="24" y="124" class="mono" style="fill:var(--d-accent)">nandlog_chip.h</text>
+        <text x="616" y="124" text-anchor="end" class="sm">12 functions &mdash; what the log needs from a part</text>
+
+        <rect class="box" x="60" y="138" width="250" height="46" rx="4"/>
+        <text x="185" y="158" text-anchor="middle" class="mono">chips/nandlog_chip_AS5F…c</text>
+        <text x="185" y="175" text-anchor="middle" class="sm">one self-contained driver</text>
+        <rect class="box" x="330" y="138" width="250" height="46" rx="4"/>
+        <text x="455" y="158" text-anchor="middle" class="mono">chips/nandlog_chip_W25N…c</text>
+        <text x="455" y="175" text-anchor="middle" class="sm">per fitted part</text>
+
+        <line class="seam" x1="20" y1="196" x2="620" y2="196"/>
+        <text x="24" y="192" class="mono" style="fill:var(--d-accent)">nandlog_port.h</text>
+        <text x="616" y="192" text-anchor="end" class="sm">13 functions &mdash; what the log needs from a platform</text>
+
+        <rect class="accent" x="60" y="206" width="520" height="52" rx="4"/>
+        <text x="320" y="227" text-anchor="middle" class="hd">your nandlog_port.c</text>
+        <text x="320" y="246" text-anchor="middle" class="sm">transfers, init, lock, power, delays, faults &mdash; the only file you write</text>
+
+        <rect class="box" x="60" y="268" width="520" height="34" rx="4"/>
+        <text x="320" y="290" text-anchor="middle" class="sm">SPI peripheral &rarr; NAND part</text>
+      </svg>
+      <figcaption><b>Figure 1.</b> Four layers, three interfaces. The chip interface sits at the
+        <em>command</em> level rather than the page level, which is what lets a host simulator emulate the
+        part and run the production driver on it unmodified.</figcaption>
+    </figure>
+
+    <h2>What it provides</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Capability</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr><td>Static allocation</td><td>About 18&nbsp;kB of RAM on a 4&nbsp;KB-page part, fixed at compile time. No <code>malloc</code>.</td></tr>
+        <tr><td>Power-fail safety</td><td>A page torn by power loss fails its CRC on the next boot and is reported as a gap, never as data.</td></tr>
+        <tr><td>Corruption detection</td><td>Separate CRC-32 over each page header and each payload.</td></tr>
+        <tr><td>Bad-block handling</td><td>Blocks that refuse a write or an erase are retired, and pages already in them are relocated.</td></tr>
+        <tr><td>Fast recovery</td><td>The write head is located in O(log&nbsp;n) page reads after a reboot, without scanning the array.</td></tr>
+        <tr><td>Bulk offload</td><td>Time-bounded reads, a framed wire format with per-page CRCs, and per-page retransmission.</td></tr>
+        <tr><td>Multiple generations</td><td>Epochs, with earlier ones still readable until the write head sweeps over them.</td></tr>
+        <tr><td>Bounded work</td><td>Every search loop has a stated bound, so a failing part cannot stall the calling task indefinitely.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>What it does not do</h2>
+
+    <ul>
+      <li><strong>Interpret records.</strong> A record's contents and length are the application's business; the log stores opaque bytes.</li>
+      <li><strong>Read a clock.</strong> Timestamps are supplied by the caller, compared, and never interpreted.</li>
+      <li><strong>Allocate.</strong> Everything is static and sized at compile time.</li>
+      <li><strong>Wear-level.</strong> The write head sweeps forward and wraps. Anything more would need a mapping table.</li>
+      <li><strong>Random-access update.</strong> A page is written once and never revised.</li>
+    </ul>
+
+    <h2>A minimal example</h2>
+
+<pre><code>#include "nandlog.h"
+
+if (!nandlog_init())
+   return;                        /* no part fitted, or the port would not open */
+
+nandlog_begin_session();
+nandlog_begin_epoch(&amp;details, sizeof(details));
+nandlog_end_session();
+
+nandlog_store_record(RECORD_SAMPLE, milliseconds, &amp;sample, sizeof(sample));
+nandlog_flush(true);</code></pre>
+
+    <p>See <a href="getting-started.html">Getting Started</a> for the complete picture, including reading data
+       back.</p>
+
+    <h2>Supported parts</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Driver</th><th>Part</th><th>Page</th><th>Block</th><th>Array</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog_chip_AS5F18G04SND.c</code></td><td>Alliance Memory, 8&nbsp;Gbit</td><td>4096 + 256 B</td><td>64 pages</td><td>4096 blocks</td></tr>
+        <tr><td><code>nandlog_chip_W25N01GWZEIG.c</code></td><td>Winbond, 1&nbsp;Gbit</td><td>2048 + 64 B</td><td>64 pages</td><td>1024 blocks</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Any other part needs a driver, which is one <code>.c</code> file. See
+       <a href="chips.html">Chip Drivers</a>.</p>
+
+    <h2>Requirements</h2>
+
+    <ul>
+      <li>A C99 compiler. Build with <code>-fno-strict-aliasing</code>.</li>
+      <li>A SPI NAND part with a power-of-two number of pages per block.</li>
+      <li>Roughly 18&nbsp;kB of RAM for a 4&nbsp;KB-page part, less for a smaller one.</li>
+      <li>No RTOS, heap, or filesystem is required. A mutex is required only if more than one thread calls the library.</li>
+    </ul>
+
+    <h2>Project layout</h2>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Path</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td><code>nandlog.c</code>, <code>nandlog.h</code></td><td>The log core and its public API.</td></tr>
+        <tr><td><code>nandlog_conf.h</code></td><td>Configuration. The one file you edit rather than write.</td></tr>
+        <tr><td><code>nandlog_chip.h</code></td><td>What the log requires of a part.</td></tr>
+        <tr><td><code>nandlog_port.h</code>, <code>nandlog_port.c</code></td><td>What the log requires of a platform, and a template to fill in.</td></tr>
+        <tr><td><code>chips/</code></td><td>One self-contained driver per supported part.</td></tr>
+        <tr><td><code>sim/</code></td><td>Host build: the real log and chip driver over a RAM-backed emulated part.</td></tr>
+        <tr><td><code>tests/</code></td><td>Applications that run on real hardware.</td></tr>
+        <tr><td><code>tools/nandlog_parse.py</code></td><td>Reference reader for raw images and offload streams.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>License</h2>
+    <p>MIT.</p>
+
+    <footer>
+      <p>nandlog is MIT-licensed. <a href="https://github.com/hedgetechllc/nandlog">Source on GitHub</a>.</p>
+      <p class="muted">Design rationale, trade-offs and field results are covered in the whitepaper
+         <em>(arXiv link to follow)</em>.</p>
+    </footer>
+  </main>
+</div>
+</body>
+</html>
