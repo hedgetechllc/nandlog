@@ -573,6 +573,38 @@ static void test_a_small_backward_step_keeps_its_own_timestamp(void)
 }
 
 
+static void test_every_read_declares_exactly_what_it_delivers(void)
+{
+   // A host sizes what it receives from the span, so a span that disagrees with the pages sent either cuts the last
+   // page off or leaves it waiting in the link for whatever is read next. Two runs with a gap between them give a
+   // window ending mid-log, one ending past the last page, one with nothing logged inside it, and one after it all
+   printf("Every read declares exactly what it delivers\n");
+   fresh_log();
+   write_records(9, 1000);
+   write_records(9, 100000);
+   static const uint32_t windows[][2] = { { 0, 0 }, { 1500, 0 }, { 0, 1500 }, { 0, 900000 }, { 1500, 900000 },
+                                          { 50000, 60000 }, { 500000, 600000 } };
+   for (uint32_t w = 0; w < (sizeof(windows) / sizeof(windows[0])); ++w)
+   {
+      const uint32_t start = windows[w][0], end = windows[w][1];
+      uint32_t pages = 0, bytes = 0, delivered = 0;
+      nandlog_begin_session();
+      nandlog_begin_reading(start, end);
+      nandlog_read_span(&pages, &bytes);
+      for (uint32_t i = 0; i < pages; ++i)
+         delivered += nandlog_retrieve_next_page(readback, NULL);
+      const uint32_t beyond = nandlog_retrieve_next_page(readback, NULL);
+      nandlog_end_reading();
+      nandlog_end_session();
+      CHECK(bytes == delivered, "a read of %u..%u declared %u bytes but delivered %u", start, end, bytes, delivered);
+      CHECK(beyond == 0, "a read of %u..%u still had %u bytes to send after the %u pages it declared", start, end, beyond, pages);
+      if (start >= 50000)
+         CHECK(pages == 0, "a read of %u..%u, which nothing was logged in, declared %u pages", start, end, pages);
+   }
+   nandlog_deinit();
+}
+
+
 int main(void)
 {
    printf("nandlog host tests (record framing %s)\n==================================%s\n", NANDLOG_RECORD_FRAMING ? "on" : "off", NANDLOG_RECORD_FRAMING ? "=" : "");
@@ -595,6 +627,7 @@ int main(void)
    test_busy_timeout_is_fatal();
    test_date_limited_read_spans_a_time_discontinuity();
    test_a_small_backward_step_keeps_its_own_timestamp();
+   test_every_read_declares_exactly_what_it_delivers();
 
    const nandlog_sim_counters_t counters = nandlog_sim_counters();
    printf("\n%u checks, %u failed\n", tests_run, tests_failed);

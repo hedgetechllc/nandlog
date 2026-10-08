@@ -772,13 +772,22 @@ static void nandlog_begin_reading_locked(uint32_t starting_timestamp, uint32_t e
    last_reading_page = view_end_page();
    is_reading = in_session;
    const uint32_t page_count = epoch_page_count();
+   uint32_t first_index = 0;
    if (starting_timestamp)
    {
-      const uint32_t index = seek_page_for_timestamp(starting_timestamp, page_count, true);
-      reading_page = (index < page_count) ? log_wrap_page(view_start_page() + index) : view_end_page();
+      first_index = seek_page_for_timestamp(starting_timestamp, page_count, true);
+      reading_page = (first_index < page_count) ? log_wrap_page(view_start_page() + first_index) : view_end_page();
    }
-   if (ending_timestamp)
-      last_reading_page = log_wrap_page(view_start_page() + seek_page_for_timestamp(ending_timestamp, page_count, false));
+   if (ending_timestamp && (first_index < page_count))
+   {
+      // A window that falls in a gap, with nothing logged inside it, ends on a page BEFORE the one it starts on.
+      // That selects nothing, rather than wrapping all the way around the region from one to the other
+      const uint32_t last_index = seek_page_for_timestamp(ending_timestamp, page_count, false);
+      if (last_index < first_index)
+         reading_page = view_end_page();
+      else
+         last_reading_page = log_wrap_page(view_start_page() + last_index);
+   }
 }
 
 static void nandlog_end_reading_locked(void)
@@ -820,8 +829,11 @@ static void nandlog_read_span_locked(uint32_t *num_pages, uint32_t *num_bytes)
       // waiting to stop on, and the equality test then never holds again
       if (num_bytes)
       {
+         // A read bounded by an end time stops ON its last page, which is sent and so counted here. An unbounded
+         // one stops at the write head, which holds nothing yet; what is buffered for it is added below
+         const bool bounded = (last_reading_page != view_end_page());
          uint32_t page = reading_page;
-         for (uint32_t visited = 0; (page != last_reading_page) && (visited < log_region_page_count); ++visited)
+         for (uint32_t visited = 0; (bounded || (page != last_reading_page)) && (visited < log_region_page_count); ++visited)
          {
             if (nandlog_chip_is_bad_block(page))
                page = log_next_block(page);
@@ -829,6 +841,8 @@ static void nandlog_read_span_locked(uint32_t *num_pages, uint32_t *num_bytes)
             {
                if (nandlog_chip_read_page(transfer_buffer, page))
                   bytes += validated_payload_length(transfer_buffer);
+               if (page == last_reading_page)
+                  break;
                page = log_next_page(page);
             }
          }

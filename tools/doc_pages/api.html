@@ -173,7 +173,7 @@ nandlog_end_session();</code></pre>
       <p>Open a read over the selected epoch, bounded by timestamp. Zero for either bound means "from the
          beginning" and "to the end"; both bounds are resolved here, so nothing downstream has to seek
          again. Both err outward &mdash; a little extra data to filter beats dropping data that was asked
-         for.</p>
+         for. A window with nothing logged inside it, such as one falling between two runs, selects nothing.</p>
       <p><strong>Requires a session.</strong> While a read is open, writing is refused.</p>
     </div>
 
