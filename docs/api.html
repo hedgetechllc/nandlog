@@ -183,6 +183,11 @@ nandlog_end_session();</code></pre>
       <p>Append one record to the page being assembled in RAM. <code>record_type</code> and
          <code>data</code> are opaque to the log; the timestamp is only ever compared, never interpreted, so
          its epoch and units are yours.</p>
+      <p>A timestamp may be earlier than records already in the page by up to
+         <code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code>, as when one record is stamped when something starts and
+         stored after another writer's record that was stamped later. It is kept exactly as given, and the
+         page's bounds widen to cover it, so a page is not necessarily in time order. A larger backward step
+         means the time base moved, and commits the page first.</p>
       <p>Committing a full page happens here, so this call occasionally writes to flash. Records are never
          split across pages, and <strong>one larger than a page is dropped</strong> &mdash; check
          <code>nandlog_data_bytes_per_page()</code> if your records are large.</p>

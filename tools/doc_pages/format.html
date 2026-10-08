@@ -60,8 +60,8 @@
    uint32_t magic;               /* 'TTP1' opaque, or 'TTP2' length-framed      */
    uint32_t epoch;               /* which generation of the log this belongs to */
    uint32_t seq;                 /* page index within the epoch, from 0         */
-   uint32_t first_timestamp;     /* of the first record, or 0xFFFFFFFF          */
-   uint32_t last_timestamp;      /* of the last record, or 0xFFFFFFFF           */
+   uint32_t first_timestamp;     /* of the earliest record, or 0xFFFFFFFF       */
+   uint32_t last_timestamp;      /* of the latest record, or 0xFFFFFFFF         */
    uint16_t payload_length;      /* valid payload bytes                         */
    uint16_t record_count;        /* complete records in the payload             */
    uint32_t payload_crc;         /* CRC-32 over payload[0 .. payload_length)    */
