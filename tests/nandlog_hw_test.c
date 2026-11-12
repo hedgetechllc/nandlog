@@ -64,10 +64,11 @@ void hw_power_down(void)
 uint32_t hw_scratch_page(uint32_t block_index)
 {
    // Count down from the top of the array, skipping anything already retired, so a factory-bad block at the
-   // very top does not silently turn every program in a test into an expected failure
+   // very top does not silently turn every program in a test into an expected failure -- and never below the top
+   // HW_SCRATCH_REGION_BLOCKS, where the bad-block table may be
    const nandlog_geometry_t *geometry = nandlog_chip_geometry();
    uint32_t found = 0;
-   for (uint32_t block = geometry->block_count; block-- > (geometry->block_count - geometry->reserved_blocks + 1); )
+   for (uint32_t block = geometry->block_count; block-- > (geometry->block_count - HW_SCRATCH_REGION_BLOCKS); )
    {
       const uint32_t page = block * geometry->pages_per_block;
       if (nandlog_chip_is_bad_block(page))

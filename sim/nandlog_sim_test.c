@@ -18,9 +18,42 @@ static uint32_t tests_run, tests_failed;
       if (!(cond)) { ++tests_failed; printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); } \
    } while (0)
 
+// The part the compiled driver expects to find, and where that driver looks for a factory bad-block marker
+#ifdef SIM_CHIP_WINBOND
+static const uint8_t DEVICE_ID[3] = { 0xEF, 0xBA, 0x21 };
+#define FACTORY_MARKER_OFFSET(page_size)            0
+#define IMAGE_NAME                                  "nandlog_image_winbond"
+#else
 static const uint8_t DEVICE_ID[3] = { 0x8D, 0x00, 0x00 };
+#define FACTORY_MARKER_OFFSET(page_size)            (page_size)
+#define IMAGE_NAME                                  (NANDLOG_PORT_CRC32 ? "nandlog_image_port_crc" : \
+                                                     NANDLOG_CHIP_PAGE_COPY ? "nandlog_image" : "nandlog_image_no_chip_copy")
+#endif
 
 static uint8_t payload[1024], readback[8192];
+
+static uint32_t part_pages(void)
+{
+   return nandlog_chip_geometry()->pages_per_block * nandlog_chip_geometry()->block_count;
+}
+
+static uint32_t pages_for(uint32_t records)
+{
+   // How many pages write_records() fills with this many records, on whatever part the driver describes
+   const uint32_t record_bytes = (NANDLOG_RECORD_FRAMING ? NANDLOG_FRAMING_LENGTH_BYTES : 0) + 5 + sizeof(payload);
+   const uint32_t per_page = nandlog_data_bytes_per_page() / record_bytes;
+   return (records + per_page - 1) / per_page;
+}
+
+static uint32_t epoch_first_block(void)
+{
+   // Where the current epoch began, which is where its first page went
+   nandlog_epoch_info_t info;
+   nandlog_begin_session();
+   nandlog_epoch_info(0, &info);
+   nandlog_end_session();
+   return info.first_page / nandlog_chip_geometry()->pages_per_block;
+}
 
 static void fresh_log(void)
 {
@@ -104,10 +137,15 @@ static void test_a_record_can_exactly_fill_a_page(void)
 
 static void test_image_dump_for_the_parser(void)
 {
+   // An image with everything a reader of raw dumps has to cope with: two epochs, mixed record sizes, a block
+   // that failed part-way and was relocated -- leaving its stale originals in a block the driver has retired,
+   // which a reader without the table has to recognise as copies -- an unreadable page that went over as a
+   // tombstone, and a page whose payload has rotted. The library's own view of it is written alongside, and
+   // `make` runs the reference parser over the image and compares the two
    printf("Dumping an image for the reference parser\n");
    fresh_log();
-
-   // Mixed sizes, so the dumped image exercises both the one-byte length and the escape to a wide one
+   const uint32_t pages_per_block = nandlog_chip_geometry()->pages_per_block;
+   const uint32_t first_block = epoch_first_block();
    static const uint32_t sizes[] = { 3, 60, 254, 255, 700 };
    for (uint32_t i = 0; i < 120; ++i)
    {
@@ -116,23 +154,72 @@ static void test_image_dump_for_the_parser(void)
       nandlog_store_record((uint8_t)(1 + (i % 5)), 1000 + (10 * i), payload, length);
    }
    nandlog_flush(true);
-   const uint32_t pages = read_all_pages();
-   CHECK(pages > 0, "nothing to dump");
 
-   // Rot one page so the parser has a failure to find as well as successes to verify
-   for (uint32_t page = 0; page < 4096 * 64; ++page)
+   // A second epoch, whose first block fails with one of its pages unreadable: its bytes rot as well, as an
+   // uncorrectable page's would
+   nandlog_begin_session();
+   const uint8_t details[16] = "second";
+   nandlog_begin_epoch(details, sizeof(details));
+   nandlog_end_session();
+   const uint32_t second_block = epoch_first_block();
+   write_records(30, 50000);
+   const uint32_t unreadable = (second_block * pages_per_block) + 3;
+   nandlog_sim_set_ecc_status(unreadable, NANDLOG_SIM_ECC_UNCORRECTABLE);
+   nandlog_sim_corrupt(unreadable, 100, 0x0F);
+   nandlog_sim_faults_t faults;
+   memset(&faults, 0, sizeof(faults));
+   memcpy(faults.device_id, DEVICE_ID, sizeof(DEVICE_ID));
+   faults.unwritable_blocks[0] = second_block;
+   faults.num_unwritable_blocks = 1;
+   nandlog_sim_set_faults(&faults);
+   write_records(6, 60000);
+   memset(&faults, 0, sizeof(faults));
+   memcpy(faults.device_id, DEVICE_ID, sizeof(DEVICE_ID));
+   nandlog_sim_set_faults(&faults);
+   CHECK(nandlog_chip_is_bad_block(second_block * pages_per_block), "the failing block was not retired");
+
+   // Rot one payload in the first epoch
+   nandlog_sim_corrupt((first_block * pages_per_block) + 1, 300, 0xFF);
+
+   // The library's view, page by page, of both epochs
+   char image[64], view_name[72];
+   snprintf(image, sizeof(image), "%s%s.bin", IMAGE_NAME, NANDLOG_RECORD_FRAMING ? "_framed" : "");
+   snprintf(view_name, sizeof(view_name), "%s.view", image);
+   FILE *view = fopen(view_name, "w");
+   CHECK(view != NULL, "could not write the library's view");
+   uint32_t tombstones = 0;
+   nandlog_begin_session();
+   for (uint32_t e = 0; view && (e < nandlog_epoch_count()); ++e)
    {
-      uint32_t magic;
-      memcpy(&magic, nandlog_sim_raw_page(page), sizeof(magic));
-      if (magic == NANDLOG_PAGE_MAGIC_THIS_BUILD)
+      nandlog_epoch_info_t info;
+      nandlog_epoch_info(e, &info);
+      if (e)
+         nandlog_select_epoch(info.epoch);
+      uint32_t pages = 0;
+      nandlog_begin_reading(0, 0);
+      nandlog_read_span(&pages, NULL);
+      for (uint32_t i = 0; i < pages; ++i)
       {
-         nandlog_sim_corrupt(page + 1, 300, 0xFF);
-         break;
+         nandlog_page_header_t header;
+         const uint32_t length = nandlog_retrieve_next_page(readback, &header);
+         fprintf(view, "%u %u %u %u\n", info.epoch, header.seq, length, length ? header.record_count : 0);
       }
+      nandlog_end_reading();
+      nandlog_select_current_epoch();
    }
+   nandlog_end_session();
+   if (view)
+      fclose(view);
+   for (uint32_t page = 0; page < (16 * pages_per_block); ++page)
+   {
+      const nandlog_page_header_t *header = (const nandlog_page_header_t*)nandlog_sim_raw_page(page);
+      tombstones += ((header->magic == NANDLOG_PAGE_MAGIC_THIS_BUILD) && !header->payload_length && !nandlog_chip_is_bad_block(page)) ? 1 : 0;
+   }
+   CHECK(tombstones == 1, "expected one tombstone in the image, found %u", tombstones);
+
    // The metadata ring plus the first blocks of the log region is all this test touched
-   CHECK(nandlog_sim_dump(NANDLOG_RECORD_FRAMING ? "nandlog_image_framed.bin" : "nandlog_image.bin", 0, 1024), "could not write the image");
-   printf("  wrote %s\n", NANDLOG_RECORD_FRAMING ? "nandlog_image_framed.bin" : "nandlog_image.bin");
+   CHECK(nandlog_sim_dump(image, 0, 16 * pages_per_block), "could not write the image");
+   printf("  wrote %s and %s\n", image, view_name);
    nandlog_deinit();
 }
 
@@ -229,14 +316,16 @@ static void test_a_factory_marked_block_is_found_in_the_spare_area(void)
 
    // Mark block 12 the way a manufacturer does: a non-0xFF byte at the first byte of the spare area of the
    // block's first page, with the main array left erased. A read that starts at column zero cannot see this
-   // without dragging the whole page along behind it, so this is what exercises the column-addressed read
+   // without dragging the whole page along behind it, so this is what exercises the column-addressed read. The
+   // Winbond driver looks for its marker at the start of the page instead, so that is where it goes for that part
    const uint32_t page_size = nandlog_chip_geometry()->page_size_bytes;
    const uint32_t pages_per_block = nandlog_chip_geometry()->pages_per_block;
    const uint32_t marked_page = 12 * pages_per_block;
    uint8_t *raw = nandlog_sim_raw_page(marked_page);
    CHECK(raw != NULL, "the simulator would not hand back block 12's first page");
+   (void)page_size;
    if (raw)
-      raw[page_size] = 0x00;
+      raw[FACTORY_MARKER_OFFSET(page_size)] = 0x00;
 
    CHECK(nandlog_init(), "init failed with a factory-marked block present");
    CHECK(nandlog_chip_is_bad_block(marked_page), "the factory-marked block was not retired at first boot");
@@ -282,16 +371,17 @@ static void test_relocating_a_block_does_not_move_pages_across_the_bus(void)
                                                             : "reads and writes every page");
    fresh_log();
 
-   // Commit exactly twenty pages into the epoch's first block, then take that block away. The next page
-   // write has nowhere to go, so those twenty have to be relocated -- which is the work being measured
+   // Commit sixty records -- twenty pages on a 4 KiB part -- into the epoch's first block, then take that block
+   // away. The next page write has nowhere to go, so those pages have to be relocated, which is the work measured
    write_records(60, 1000);
    const uint32_t before = read_all_pages();
-   CHECK(before == 20, "expected twenty committed pages before the fault, got %u", before);
+   CHECK(before == pages_for(60), "expected %u committed pages before the fault, got %u", pages_for(60), before);
 
+   const uint32_t first_block = epoch_first_block();
    nandlog_sim_faults_t faults;
    memset(&faults, 0, sizeof(faults));
    memcpy(faults.device_id, DEVICE_ID, sizeof(DEVICE_ID));
-   faults.unwritable_blocks[0] = 9;
+   faults.unwritable_blocks[0] = first_block;
    faults.num_unwritable_blocks = 1;
    nandlog_sim_set_faults(&faults);
 
@@ -302,12 +392,14 @@ static void test_relocating_a_block_does_not_move_pages_across_the_bus(void)
    const uint32_t relocated_bytes = before * nandlog_chip_geometry()->page_size_bytes;
    const uint32_t after = read_all_pages();
 
-   CHECK(nandlog_chip_is_bad_block(9 * 64), "the block that refused the write was not retired");
+   CHECK(nandlog_chip_is_bad_block(first_block * 64), "the block that refused the write was not retired");
    CHECK(after >= before, "relocation lost committed pages (%u -> %u)", before, after);
 #if NANDLOG_CHIP_PAGE_COPY
-   // The page still has to be written and read back once to verify it, and retiring the block persists a
-   // marker page, so the bound is not zero -- but it is far below the pages that moved
-   CHECK(traffic < relocated_bytes, "an internal copy still moved %u bytes to relocate %u bytes of pages", traffic, relocated_bytes);
+   // Each moved page is read whole once over the bus, so it is judged from one read, and its copy's header is read
+   // back; the new page still has to be written and read back once, and retiring the block persists a table page
+   // and metadata slots. Through RAM every page would cross the bus three times -- read, written, read back -- so
+   // the bound is well under two
+   CHECK(traffic < (2 * relocated_bytes), "an internal copy still moved %u bytes to relocate %u bytes of pages", traffic, relocated_bytes);
 #else
    CHECK(traffic > (2 * relocated_bytes), "the read-and-write path moved only %u bytes to relocate %u bytes of pages, so it cannot have read and written each one", traffic, relocated_bytes);
 #endif
@@ -321,7 +413,7 @@ static void test_an_earlier_epoch_can_be_listed_and_read(void)
    fresh_log();                        // epoch 1
    write_records(30, 1000);            // ten pages
    const uint32_t epoch_one_pages = read_all_pages();
-   CHECK(epoch_one_pages == 10, "expected ten pages in the first epoch, got %u", epoch_one_pages);
+   CHECK(epoch_one_pages == pages_for(30), "expected %u pages in the first epoch, got %u", pages_for(30), epoch_one_pages);
 
    // Begin a second epoch and put a different amount of data in it
    nandlog_begin_session();
@@ -329,7 +421,7 @@ static void test_an_earlier_epoch_can_be_listed_and_read(void)
    CHECK(nandlog_begin_epoch(details, sizeof(details)), "beginning a second epoch failed");
    nandlog_end_session();
    write_records(15, 500000);
-   CHECK(read_all_pages() == 5, "expected five pages in the second epoch");
+   CHECK(read_all_pages() == pages_for(15), "expected %u pages in the second epoch", pages_for(15));
 
    nandlog_begin_session();
 
@@ -366,7 +458,7 @@ static void test_an_earlier_epoch_can_be_listed_and_read(void)
    write_records(3, 900000);
    nandlog_select_current_epoch();
    nandlog_end_session();
-   CHECK(read_all_pages() == 5, "a record was stored while an earlier epoch was selected");
+   CHECK(read_all_pages() == pages_for(15), "a record was stored while an earlier epoch was selected");
    (void)before;
 
    // And selecting an epoch that was never written fails rather than reading something else
@@ -404,7 +496,7 @@ static void test_corrupt_page_is_rejected(void)
 
    // Rot a byte in the middle of a committed page's payload; the header still checksums, the payload does not
    uint32_t victim = 0;
-   for (uint32_t page = 0; page < 4096 * 64; ++page)
+   for (uint32_t page = 0; page < part_pages(); ++page)
    {
       const uint8_t *raw = nandlog_sim_raw_page(page);
       uint32_t magic;
@@ -449,8 +541,7 @@ static void test_reads_refuse_outside_a_session(void)
 static void test_busy_timeout_is_fatal(void)
 {
    printf("A part that never clears BUSY ends in a fatal fault\n");
-   nandlog_sim_create(DEVICE_ID, sizeof(DEVICE_ID));
-   CHECK(nandlog_init(), "init failed before the busy fault was armed");
+   fresh_log();
 
    nandlog_sim_faults_t faults;
    memset(&faults, 0, sizeof(faults));
@@ -467,6 +558,7 @@ static void test_busy_timeout_is_fatal(void)
    const char *reason = NULL;
    CHECK(nandlog_sim_fatal_seen(&reason), "no fatal fault was recorded");
    nandlog_sim_expect_fatal(false);
+   nandlog_deinit();
    nandlog_sim_destroy();
 }
 

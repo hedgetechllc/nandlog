@@ -15,8 +15,8 @@
 // the bad-block marker page. It is still a write test; run it on a development board.
 //
 // It talks to the chip directly rather than through the driver, because it has to do things no driver
-// function exposes -- turn ECC off, program a single byte at a column address -- and because the point is
-// to interrogate the silicon, not to exercise the driver.
+// function exposes -- turn ECC off, program a page that is erased but for one spare byte -- and because the
+// point is to interrogate the silicon, not to exercise the driver.
 //
 // WHAT TO REPORT BACK: every line from step 1 onwards. There are no pass/fail verdicts for most of it;
 // the values ARE the answer.
@@ -31,7 +31,6 @@
 #define COMMAND_WRITE_DISABLE                       0x04
 #define COMMAND_BLOCK_ERASE                         0xD8
 #define COMMAND_PROGRAM_DATA_LOAD                   0x02
-#define COMMAND_PROGRAM_LOAD_RANDOM_DATA            0x84
 #define COMMAND_PROGRAM_EXECUTE                     0x10
 #define COMMAND_PAGE_DATA_READ                      0x13
 #define COMMAND_READ                                0x03
@@ -53,6 +52,7 @@
 
 static uint8_t saved_status_2;
 static uint32_t marker_page;
+static uint8_t page_image[NANDLOG_MAX_PAGE_SIZE_BYTES + NANDLOG_MAX_SPARE_SIZE_BYTES];
 
 // Whether step 0 found a marker from a previous run. Once it has, the power-cycle question is answered and
 // the marker can be cleared -- otherwise it stays on the part for good, and every later survey counts it as
@@ -107,18 +107,22 @@ static uint8_t latch_and_read(uint8_t *out, uint32_t page, uint32_t column, uint
    return status;
 }
 
-// Program 'length' bytes at 'column' WITHOUT resetting the rest of the cache register first, which is what
-// 0x84 is for. 0x02 would clear the whole register to 0xFF, which for a single spare byte is the same thing
-// -- but only because the page is erased, and being explicit costs nothing
-static bool program_at_column(uint32_t page, uint32_t column, const uint8_t *data, uint32_t length, bool reset_cache)
+// Program 'length' bytes at 'column' of an otherwise erased page and spare area. The load ALWAYS starts at column
+// 0 and covers the whole page and spare area, FFh outside the bytes given: on this part a PROGRAM LOAD resets the
+// cache register only from the column it starts at, and the bytes before that column -- whatever the last page
+// read left there -- are programmed too. A one-byte load at the spare area's column after reading a page of zeros
+// writes 4,096 zeros into the main area. The driver programs its marks this way, for the same reason
+static bool program_at_column(uint32_t page, uint32_t column, const uint8_t *data, uint32_t length)
 {
-   const uint8_t column_address[2] = { (uint8_t)(column >> 8), (uint8_t)column };
+   static const uint8_t column_zero[2] = { 0x00, 0x00 };
+   const uint32_t image_length = PAGE_BYTES + nandlog_chip_geometry()->spare_size_bytes;
+   memset(page_image, 0xFF, image_length);
+   memcpy(page_image + column, data, length);
    uint8_t page_address[3];
    split_page_address(page, page_address);
    wait_until_not_busy();
    nandlog_port_transfer_write(COMMAND_WRITE_ENABLE, NULL, 0, NULL, 0);
-   nandlog_port_transfer_write(reset_cache ? COMMAND_PROGRAM_DATA_LOAD : COMMAND_PROGRAM_LOAD_RANDOM_DATA,
-                               column_address, sizeof(column_address), data, length);
+   nandlog_port_transfer_write(COMMAND_PROGRAM_DATA_LOAD, column_zero, sizeof(column_zero), page_image, image_length);
    wait_until_not_busy();
    nandlog_port_transfer_write(COMMAND_PROGRAM_EXECUTE, NULL, 0, page_address, sizeof(page_address));
    wait_until_not_busy();
@@ -240,7 +244,7 @@ static void step_3_program_the_marker(void)
 
    set_ecc(false);
    static const uint8_t marker = 0x00;
-   const bool programmed = program_at_column(marker_page, PAGE_BYTES, &marker, 1, true);
+   const bool programmed = program_at_column(marker_page, PAGE_BYTES, &marker, 1);
    HW_CHECK(programmed, "programming the marker byte reported a write failure");
 
    uint8_t after = 0xFF;
@@ -295,12 +299,13 @@ static void step_5_second_partial_program(void)
    // First partial program: a few bytes of the main array
    static const uint8_t data[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
    set_ecc(false);
-   const bool first = program_at_column(nop_page, 0, data, sizeof(data), true);
+   const bool first = program_at_column(nop_page, 0, data, sizeof(data));
    print("  first partial program (main array) : %s\n", first ? "accepted" : "REFUSED");
 
-   // Second partial program: the marker byte in the spare area of the same page
+   // Second partial program: the marker byte in the spare area of the same page, the rest of the load FFh, so the
+   // first program's bytes are not programmed again
    static const uint8_t marker = 0x00;
-   const bool second = program_at_column(nop_page, PAGE_BYTES, &marker, 1, false);
+   const bool second = program_at_column(nop_page, PAGE_BYTES, &marker, 1);
    print("  second partial program (spare area): %s\n", second ? "accepted" : "REFUSED");
 
    uint8_t read_back = 0xFF;

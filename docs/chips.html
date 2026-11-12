@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Chip Drivers &middot; nandlog</title>
-<meta name="description" content="How to add support for a SPI NAND part that nandlog does not already have a driver for. One .c file, twelve functions.">
+<meta name="description" content="How to add support for a SPI NAND part that nandlog does not already have a driver for. One .c file, fifteen functions.">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128190;</text></svg>">
 </head>
@@ -12,7 +12,7 @@
 <a class="skip" href="#content">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="index.html">nandlog</a>
-  <span class="ver">v1.2</span>
+  <span class="ver">v1.0</span>
   <input type="checkbox" id="navtoggle" hidden>
   <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
   <nav class="sidenav">
@@ -24,7 +24,6 @@
     <a href="format.html">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
-    <a href="upgrading.html">Upgrading</a>
   </nav>
 </header>
 <div class="layout">
@@ -37,11 +36,10 @@
     <a href="format.html">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
-    <a href="upgrading.html">Upgrading</a>
   </nav>
   <main id="content">
 <h1>Chip Drivers</h1>
-    <p class="lede">One <code>.c</code> file per part. Twelve functions.</p>
+    <p class="lede">One <code>.c</code> file per part. Fifteen functions, two of them one line each for most parts.</p>
 
     <p>Two drivers are supplied and each is complete on its own &mdash; <code>nandlog_chip_common.h</code>
        holds no command codes, no register numbers and no bit patterns, and there is no shared
@@ -59,12 +57,14 @@
 #define NANDLOG_CHIP_SPARE_SIZE_BYTES        256    /* spare/ECC bytes that follow  */
 #define NANDLOG_CHIP_PAGES_PER_BLOCK         64     /* MUST be a power of two       */
 #define NANDLOG_CHIP_BLOCK_COUNT             4096
-#define NANDLOG_CHIP_RESERVED_BLOCKS         80     /* held back for bad blocks     */
+#define NANDLOG_CHIP_RESERVED_BLOCKS         16     /* table blocks, test scratch   */
 
 #include "nandlog_chip_common.h"</code></pre>
 
     <p>The common header checks the set is complete, asserts the page fits
-       <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code>, and derives the addressing that follows:</p>
+       <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code>, and derives the addressing that follows. A driver's busy-wait polls
+       the status register at most <code>NANDLOG_BUSY_TIMEOUT_POLLS</code> times, <code>NANDLOG_BUSY_POLL_INTERVAL_US</code>
+       apart, both from <code>nandlog_conf.h</code>: a count, since the port has no clock.</p>
 
     <div class="tablewrap">
     <table>
@@ -74,17 +74,20 @@
         <tr><td><code>NANDLOG_CHIP_PAGE_WITH_SPARE_SIZE_BYTES</code></td><td>page + spare</td></tr>
         <tr><td><code>NANDLOG_CHIP_BLOCK_MASK</code></td><td>mask a page address to its block</td></tr>
         <tr><td><code>NANDLOG_CHIP_RESERVED_BASE_PAGE</code></td><td>first page of the reserve</td></tr>
-        <tr><td><code>NANDLOG_BUSY_TIMEOUT_POLLS</code></td><td>poll count from the configured timeout</td></tr>
         <tr><td><code>NANDLOG_CHIP_GEOMETRY_INITIALIZER</code></td><td>fills a <code>nandlog_geometry_t</code></td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>How many blocks to reserve is a judgement call. It must cover the factory bad blocks (typically up to
-       2% of the array) plus whatever the part accumulates in service, plus somewhere to persist a bad-block
-       table if your part has no hardware remapping. The supplied drivers reserve 80 of 4096 and 40 of 1024.</p>
+    <p>How many blocks to reserve depends on how the part handles bad blocks. A driver that keeps its own table
+       and lets the log step over bad blocks where they lie needs no spare blocks: the reserve is only where the
+       table lives, plus scratch for the on-device tests. The Alliance driver reserves 16 of 4096 &mdash; its table
+       in the first eight, the tests' scratch in the top eight &mdash; and bad blocks, up to the datasheet's 80, cost
+       the log region capacity wherever they fall. A part that remaps in hardware needs its spare pool reserved:
+       the Winbond driver keeps 40 of 1024 for the part to remap into. If the reserve itself fails, a driver
+       that keeps its own table can ask the log for blocks of the region instead (section 3).</p>
 
-    <h2>2. Implement twelve functions</h2>
+    <h2>2. Implement fifteen functions</h2>
 
     <div class="note">
       <p><strong>Power contract.</strong> Every function below that touches the bus may assume the port is
@@ -132,15 +135,30 @@
     <h3>Data</h3>
 
     <div class="fn">
-      <pre>bool nandlog_chip_read_page(uint8_t *buffer, uint32_t page);</pre>
-      <p>Read a whole page. <strong>Returns false</strong> if the read reported an uncorrectable ECC error
-         and the buffer is untrustworthy.</p>
+      <pre>nandlog_read_result_t nandlog_chip_read_page(uint8_t *buffer, uint32_t page);</pre>
+      <p>Read a whole page with the part's ECC on, and report the part's verdict:</p>
+      <div class="tablewrap">
+      <table>
+        <thead><tr><th>Value</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>NANDLOG_READ_UNCORRECTABLE</code> (0)</td><td>The part's ECC could not correct the page. The buffer holds raw cells.</td></tr>
+          <tr><td><code>NANDLOG_READ_OK</code></td><td>No error, or errors corrected with margin to spare.</td></tr>
+          <tr><td><code>NANDLOG_READ_AT_ECC_LIMIT</code></td><td>Corrected, but only at the limit of the part's ECC: readable, and worth reporting. A page the log has just written that reads back so counts as not written; a copy of the newest metadata slot that reads so at boot is written again elsewhere.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Zero is unreadable, anything else is usable data. <strong>Decode your part's status bits
+         from its datasheet, not by analogy.</strong> The Alliance part reports ECCS&nbsp;<code>11b</code> for a
+         page corrected at the ECC maximum, which is readable; the Winbond part uses the same code for an
+         uncorrectable error in a continuous read. Testing one bit for "uncorrectable" is right for the second
+         and wrong for the first. A part with no "at the limit" verdict, like the Winbond one, simply never reports
+         it; the log then never writes a slot again for its wear.</p>
     </div>
 
     <div class="fn">
-      <pre>bool nandlog_chip_read_page_region(uint8_t *buffer, uint32_t page,
-                                   uint32_t offset, uint32_t length);</pre>
-      <p>Read <code>length</code> bytes starting at <code>offset</code> within the page. Same return meaning.</p>
+      <pre>nandlog_read_result_t nandlog_chip_read_page_region(uint8_t *buffer, uint32_t page,
+                                                    uint32_t offset, uint32_t length);</pre>
+      <p>Read <code>length</code> bytes starting at <code>offset</code> within the page. Same result.</p>
       <div class="warn">
         <p><strong>This one carries the most weight.</strong> The log reads far more 32-byte headers than
            whole pages, and a driver that implements this as "read the whole page and copy a slice" throws
@@ -151,7 +169,7 @@
       <p>Reading less than a page is safe on any part with on-die ECC: correction happens when the page is
          latched into the cache register, so the error status is settled before a byte is clocked out and
          cannot depend on how much of that register the host then looks at.</p>
-<pre><code>static bool read_page_region(uint8_t *buffer, uint32_t page, uint32_t column, uint32_t length)
+<pre><code>static nandlog_read_result_t read_page_region(uint8_t *buffer, uint32_t page, uint32_t column, uint32_t length)
 {
    /* 16-bit column address, most significant byte first, then a dummy byte */
    const uint8_t column_address[3] = { (uint8_t)(column &gt;&gt; 8), (uint8_t)column, 0x00 };
@@ -160,23 +178,63 @@
 
    wait_until_not_busy();
    nandlog_port_transfer_write(COMMAND_PAGE_DATA_READ, NULL, 0, page_address, sizeof(page_address));
-   wait_until_not_busy();
+   const uint8_t status = wait_until_not_busy();      /* the word that ends the wait carries the verdict */
    nandlog_port_transfer_read(COMMAND_READ, column_address, sizeof(column_address), buffer, length);
-   wait_until_not_busy();
-   return (read_register(STATUS_REGISTER_3) &amp; STATUS_PAGE_FATAL_ERROR) != STATUS_PAGE_FATAL_ERROR;
+   switch (status &amp; STATUS_ECC_MASK)
+   {
+      case STATUS_ECC_UNCORRECTABLE: return NANDLOG_READ_UNCORRECTABLE;
+      case STATUS_ECC_AT_LIMIT:      return NANDLOG_READ_AT_ECC_LIMIT;
+      default:                       return NANDLOG_READ_OK;
+   }
 }</code></pre>
     </div>
 
     <div class="fn">
+      <pre>bool nandlog_chip_page_is_blank(uint32_t page);</pre>
+      <p>Whether every bit of the page, main area and spare, reads erased. This is how the log tells the
+         write head from a page a power cut tore, and it programs nothing that has not either been erased by
+         it or passed this test.</p>
+      <p><strong>Read with the part's ECC bypassed</strong> where the part allows it &mdash; turn ECC off
+         in its configuration register, read the whole page and spare, turn it back on. An ECC engine's
+         handling of an erased page can correct a few stray programmed bits to <code>0xFF</code>, which hides
+         exactly the lightly programmed page this exists to find. Count every bit: a false "not blank" costs
+         one page, a false "blank" costs a second program on a part that permits one, so err towards the
+         former. <code>nandlog_chip.h</code> provides <code>nandlog_bytes_erased(data, length)</code> for the
+         scan; it goes 16 bytes a step, where a byte-at-a-time loop over a 4,352-byte page and spare cost about
+         360&nbsp;&micro;s on a 96&nbsp;MHz Cortex-M4.</p>
+    </div>
+
+    <div class="fn">
       <pre>bool nandlog_chip_write_page(const uint8_t *data, uint32_t page);</pre>
-      <p>Program a whole page, retrying up to <code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code> times.
-         Returns false if the part reported a program failure every time. Whether the block is then retired
-         is the caller's decision. Open and close write protection for yourself.</p>
+      <p>Program a whole page with <strong>one</strong> PROGRAM EXECUTE. Returns false if the part reported a
+         program failure. <strong>Never repeat a program that failed:</strong> the page may now hold a partial
+         program, and a part with one program per page (NOP&nbsp;=&nbsp;1, as both supplied parts are) does not
+         allow a second. The log relocates the block instead. Open and close write protection for
+         yourself.</p>
+      <div class="warn">
+        <p><strong>Always start PROGRAM LOAD at column 0.</strong> A PROGRAM LOAD may not clear the cache
+           register before its start column. On the Alliance part it resets the register to <code>FFh</code>
+           only from the column it names to the end of the spare area. Bytes before that column keep whatever
+           the last page read or load left there, and PROGRAM EXECUTE programs them too. On silicon, a one-byte
+           load at the spare area's column, issued after a page of zeros had been read, wrote 4,096 zeros into
+           the main area. So never load at a non-zero column, with <code>02h</code> or with a random-data load.
+           To change a few bytes of a page, such as a bad-block mark in the spare area, load the whole page and
+           spare area from column 0, <code>FFh</code> everywhere else. <code>FFh</code> programs nothing. Both
+           supplied drivers have one function that issues PROGRAM LOAD, and it always loads the whole of what it
+           writes, in one <code>02h</code> from column 0: a page, or a page and its spare area for a mark, from a
+           buffer that size. Neither uses PROGRAM LOAD RANDOM DATA (<code>84h</code>), which the Alliance datasheet
+           allows only in an internal data move, after a page read of the source; the OTP area takes only page reads
+           and page programs, and a mark has no page it is sure to find erased to move from. The simulator models
+           the Alliance behaviour, so a load from any other column programs stale bytes there as well, and it
+           refuses an <code>84h</code> outside an internal data move.</p>
+      </div>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_chip_erase_block(uint32_t page);</pre>
-      <p>Erase the block containing <code>page</code>. False means the part reported an erase failure.</p>
+      <p>Erase the block containing <code>page</code>, attempting it up to
+         <code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code> times &mdash; unlike a program, an erase can be
+         repeated harmlessly. False means the part reported an erase failure every time.</p>
     </div>
 
     <div class="fn">
@@ -198,7 +256,7 @@
       </div>
       <p>A part with no internal data-move command expands a macro instead of writing this out:</p>
 <pre><code>NANDLOG_CHIP_NO_INTERNAL_PAGE_COPY</code></pre>
-      <p>The implementation is a page read followed by a program execute, with <strong>no program data load
+      <p>The implementation is a page read followed by one program execute, with <strong>no program data load
          between them</strong> &mdash; that is the whole point:</p>
 <pre><code>wait_until_not_busy();
 nandlog_port_transfer_write(COMMAND_PAGE_DATA_READ, NULL, 0, source_address, 3);
@@ -207,9 +265,11 @@ nandlog_port_transfer_write(COMMAND_WRITE_ENABLE, NULL, 0, NULL, 0);
 nandlog_port_transfer_write(COMMAND_PROGRAM_EXECUTE, NULL, 0, destination_address, 3);
 wait_until_not_busy();</code></pre>
       <div class="note">
-        <p>An uncorrectable source page is not a failure here. Its uncorrected bytes are what lands at the
-           destination, which reads back with sound ECC and a payload CRC that will not match &mdash; a gap,
-           which is exactly what reading it into RAM and finding it unreadable would have produced.</p>
+        <p>The log reads the source page's header first and asks for a copy only of a page it can read as the
+           epoch's page at that position. An unreadable page goes over as a <em>tombstone</em> instead &mdash; a
+           valid header carrying its sequence number &mdash; because a copy of whatever its cells hold could come
+           out erased-looking, and inside the epoch that is where the write-head search would put the head.
+           Every copy is checked by reading its header back.</p>
       </div>
     </div>
 
@@ -219,23 +279,56 @@ wait_until_not_busy();</code></pre>
       <pre>bool nandlog_chip_is_bad_block(uint32_t page);</pre>
       <p>Whether the block containing <code>page</code> is known bad.</p>
       <div class="warn">
-        <p><strong>This must not touch flash.</strong> The log calls it once per page on the write path and
-           once per page in the epoch when a bounded download opens. Answer from a table or bitmap in RAM,
-           built during <code>nandlog_chip_init()</code>.</p>
+        <p><strong>This must not touch flash.</strong> The log calls it for every block once at boot, to build
+           its own sorted list of the log region's retired blocks, and for the metadata ring thereafter. Answer
+           from a table in RAM, built during <code>nandlog_chip_init()</code>. That boot pass asks about every
+           block in order, so make in-order questions cheap. A search of the whole table for each block costs
+           about 11&nbsp;ms of a boot with 11 entries at 96&nbsp;MHz; the Alliance driver keeps the run of blocks
+           around the last one asked about that hold no entry, and so searches once per entry instead.</p>
       </div>
     </div>
 
     <div class="fn">
-      <pre>void nandlog_chip_mark_bad_block(uint32_t page);</pre>
-      <p>Retire the block. Make this idempotent &mdash; retiring a block that is already retired must not
-         consume a second table slot or a second spare block.</p>
+      <pre>bool nandlog_chip_mark_bad_block(uint32_t page);</pre>
+      <p>Retire the block, <strong>persistently and atomically</strong>, and return whether that is now so.
+         The log lays its page positions out over the blocks this driver calls good, so a retirement must
+         survive a power cut at any instant either completely or not at all, and must not show in
+         <code>nandlog_chip_is_bad_block()</code> until it would. A table forgotten, or rewritten in place
+         and cut half-way, re-admits retired blocks into the middle of the epoch. Make this idempotent too
+         &mdash; retiring a block that is already retired must not consume a second table slot or a second
+         spare block.</p>
+    </div>
+
+    <div class="fn">
+      <pre>uint32_t nandlog_chip_table_blocks_wanted(uint32_t *lowest_page);</pre>
+      <p>How many blocks of the log region the driver's bad-block table needs because it has run out of places
+         of its own, as a run starting on a multiple of that many blocks, and in <code>*lowest_page</code> the
+         lowest page the run may start at. Zero if none, which is every boot of a healthy part and always for a
+         part that keeps its table in hardware. RAM only. The log asks once a boot, once it knows where the
+         current epoch lies and before it writes anything, and again when a block it is retiring cannot be
+         marked, before it tries the mark once more.</p>
+    </div>
+
+    <div class="fn">
+      <pre>bool nandlog_chip_table_take_blocks(uint32_t first_page);</pre>
+      <p>Take the run of blocks starting at <code>first_page</code> for the table and retire them, all at once:
+         <code>true</code> once the table is on the part there and names every block of the run, which
+         <code>nandlog_chip_is_bad_block()</code> then reports; <code>false</code> with none of them retired.
+         The blocks hold nothing a read could serve and no position of the current epoch &mdash; the log has
+         checked &mdash; and are the highest such run below the reserve that fits. A driver that never asks
+         returns <code>false</code>.</p>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_chip_reset_bad_blocks(void);</pre>
       <p>Recovery utility. Discard the persisted table so it is rebuilt on the next boot. Return whether the
-         table was <em>verified</em> gone afterwards, rather than assuming the erase took. A part that
-         remaps in hardware cannot forget; say so through <code>nandlog_port_log()</code> and return true.</p>
+         table was <em>verified</em> gone afterwards, rather than assuming the erase took. Leave alone every
+         block that carries a bad-block marker &mdash; erasing one would erase its marker &mdash; and keep the table
+         in RAM until the reboot, because the log may carry on logging, and retiring, in the same boot. Return
+         false, saying why through <code>nandlog_port_log()</code>, and discard nothing, if a rebuild would
+         forget a retired block &mdash; the Alliance driver programs every entry's mark once more and requires each
+         to read exactly <code>00h</code> before it erases anything &mdash; or if the part remaps in hardware and
+         cannot forget.</p>
     </div>
 
     <h2>3. Two strategies for bad blocks</h2>
@@ -248,27 +341,136 @@ wait_until_not_busy();</code></pre>
       <thead><tr><th></th><th>Software table</th><th>Hardware LUT</th></tr></thead>
       <tbody>
         <tr><td>Example</td><td><code>AS5F18G04SND</code></td><td><code>W25N01GWZEIG</code></td></tr>
-        <tr><td>Where it lives</td><td>A marker page in the reserve, mirrored in RAM</td><td>The chip's own 20-entry remapping table</td></tr>
-        <tr><td>First boot</td><td>Scan every block's spare-area marker, build the table, persist it</td><td>Read the chip's LUT; scan for factory markers once</td></tr>
-        <tr><td>Later boots</td><td>Find and load the marker page</td><td>Read the chip's LUT</td></tr>
-        <tr><td>Reset</td><td>Erase the reserve, verify no marker survives</td><td>Not possible &mdash; entries are one-way</td></tr>
+        <tr><td>Where it lives</td><td>Versioned, CRC-checked table pages in the first 8 blocks of the reserve &mdash; or, if the reserve cannot hold them, an aligned pair of log-region blocks the log gives up &mdash; mirrored in RAM</td><td>The chip's own 20-entry remapping table, factory-bad blocks included</td></tr>
+        <tr><td>A retirement</td><td>The whole table, one version higher, programmed into the next unused pair of pages and both read back before RAM believes it; then a <code>00h</code> mark in the spare area of each block the new version added</td><td>One remap entry written, then the table re-read from the chip to confirm it took</td></tr>
+        <tr><td>First boot</td><td>Scan every block's spare-area marker, persist the table, and only then mark the part initialized in OTP</td><td>Scan for factory markers, remapping each, and only then mark the part initialized in OTP</td></tr>
+        <tr><td>Later boots</td><td>Read the first pair of each table block, binary-search the newest block, and write the table again, in a fresh block, if its newest version may be torn, does not read in both copies, or reads in either only at the ECC limit; then read each entry's marker with ECC off and program again any that does not read exactly <code>00h</code>, as a completed mark does</td><td>Read the chip's LUT</td></tr>
+        <tr><td>Every copy lost</td><td>Rebuilt from the factory marks and the marks written into every block a table named, read with ECC off</td><td>Not applicable</td></tr>
+        <tr><td>Reset</td><td>Program every entry's mark once more and require each to read <code>00h</code>; then erase the reserve's unmarked blocks, the newest version's last &mdash; or, for a table kept below the reserve, mark its two blocks, the newest version's last &mdash; and verify no table survives. The table in RAM stands until the reboot</td><td>Not possible &mdash; entries are one-way</td></tr>
+        <tr><td>A reserve that cannot hold it</td><td>The table moves to an aligned pair of log-region blocks the log gives it, which every version there names as retired; or, with none to be had, the marks stand in for it (below)</td><td>Not applicable</td></tr>
+        <tr><td>Rests on</td><td>A page program completing or reporting its failure</td><td>The chip writing a LUT entry whole or not at all across a cut, which is assumed and not verified here</td></tr>
       </tbody>
     </table>
     </div>
 
+    <p>The software table is written like a log of its own: a new version never overwrites the one it
+       replaces, a page that will not take a program ends the use of its block, and a block is erased for
+       reuse only while another holds the newest version. Every version goes to a pair of pages, so one page
+       that becomes unreadable costs nothing. A version that does not read in both copies may be one a cut
+       tore, which can read valid on one boot and not the next; a boot that finds one writes the table it
+       loaded again, numbered past anything the torn version could claim, in a block of its own, before the
+       log lays out a position over it. A block whose versions all fail to read gives way to the block before
+       it, whose newest version is the one the torn block was entered from. The two copies share a block that every
+       boot reads, about ten pages of it, and that a boot which finds the table settled never writes; so whatever
+       wears it &mdash; read disturb above all &mdash; wears both together. A boot that reads either copy of the
+       newest version only at the limit of the part's ECC loads the table from it and writes the same entries
+       again the way it writes a torn version, into a fresh block; and no version counts as written whose
+       read-back the part corrects only at the limit, so a page stuck there costs one boot one version, not every
+       boot. A driver of your own that keeps paired copies of anything in the array should do the same. The same
+       wear can program one bit of the block's spare-area mark, which is outside the ECC: a block of the reserve
+       whose mark reads one programmed bit, holding a version newer than the one loaded without it, which that version
+       does not name, is read as unmarked, and its version is loaded and written again into a fresh block. No mark
+       the driver goes by reads so, and only a cut leaves one so, which then reads as a cut that left none can. The table pages carry the magic
+       <code>'BBT3'</code>, a tag whose digit is no version. The table is the authority &mdash; finding the spare-area marks would cost a read of every block at every boot
+       &mdash; and the marks are what it is rebuilt from in the one case nothing else is left. A mark goes on
+       after the version that names the block, so a cut can fall between them; every boot therefore reads the
+       marker of each block the table names, one ECC-off read apiece, and programs again any that does not read
+       exactly <code>00h</code>. A marker is
+       read with ECC off because the cells are what count: a page the ECC engine cannot correct is not a mark. A
+       table holding more entries than the datasheet allows bad blocks is reported and kept, never discarded.</p>
+
+    <h3>When the reserve cannot hold the table</h3>
+
+    <p>One board's reserve was found dead: every block reading <code>00h</code>, main and spare, and refusing every
+       program and erase. With the table nowhere, every boot rebuilt it from the marks, and the first block to
+       fail in the log region stopped the log, its retirement having nowhere to go. The Alliance driver answers in
+       two ways, with the on-flash format unchanged.</p>
+
+    <ul>
+      <li><strong>Below the reserve.</strong> When no block of the reserve can be entered, or the marks stand in
+        for the table, the driver asks for two blocks (<code>nandlog_chip_table_blocks_wanted()</code>). At the
+        next boot the log gives it the highest aligned pair below the reserve that lies outside the current
+        epoch's positions, is not the head's block, and holds no page with a valid header of any epoch &mdash; on a
+        part in service, blocks erased ahead of the head or never written; an earlier epoch's pages are never
+        taken. Before choosing, it erases any such block whose first page is programmed but not with a page of
+        the log &mdash; what a cut can leave of a move begun there. The driver erases both blocks and writes the
+        table, naming both, into the lower one, which the log would reach first; only then does it let the old
+        table go &mdash; every reserve block that may hold a version is marked, its newest version's last &mdash;
+        and it writes a second version, which tells later boots the move finished. The two blocks are retired
+        like any failed block, so positions are laid out past them and the ring's retired count and fingerprint
+        agree, and the table rotates over them as it rotates over the reserve's eight. They are the one kind of
+        entry that carries no mark, since a mark would hide the versions in them. A boot reads the reserve's
+        candidates first, and only if none of them yields a version reads one header a block down to
+        <code>NANDLOG_CHIP_TABLE_SEARCH_BLOCKS</code> from the top of the array (the reserve and the 48 blocks
+        under it, by default), two for a block whose first page reads erased: about 13 to 26 ms. The newest
+        version found decides the pair; paired copies, the settled checks and writing a version again in the
+        pair's other block work as in the reserve.</li>
+      <li><strong>Degraded mode.</strong> With no pair to be had, the spare-area marks become the record. First
+        every block the table names is marked once more and must read exactly <code>00h</code>, and every block
+        that may hold a version is marked, the newest version's last, so no boot can load one. A retirement is
+        then committed by its block's own mark, programmed with the column-0 load and ECC off, after the log has
+        moved the block's pages one block ahead, and read back exactly <code>00h</code>. A cut before the mark
+        leaves the block good and its failed page recorded in the ring, so the next boot moves it again; a mark a
+        cut tore reads as none, the same, or as a mark &mdash; and the copies are already where its positions fall.
+        Every boot of degraded mode rebuilds the table from one raw read of every block's mark, programs every mark
+        once more (a torn mark can read <code>00h</code> once and <code>FFh</code> later), and looks for a pair
+        again. The rebuild takes any byte but <code>FFh</code> for a mark, as the datasheet has software do for the
+        factory's: a mark a cut left with a bit or two programmed, or with cells that read differently from one
+        latch to the next, then reads as a mark at every boot, which is what keeps a retirement committed by its
+        mark the same at every boot. A rule that let a stray bit go would read such marks as none at one boot and
+        as marks at another; the simulator's exhaustive check shows that losing pages. The price is that the mark
+        bytes are outside the part's ECC, so a stray programmed bit in a good block's byte retires the block, here
+        and in the rebuild after the recovery utility: capacity lost, or, for a block holding part of the current
+        epoch, that block's pages out of reach and the epoch sealed, nothing erased &mdash; by its newest slot when
+        that already counts the block in its span, and otherwise by the head search, which then reads pages of the
+        epoch below their own positions, something the log's own retirements never leave. Only a stray bit in the
+        block the write head is in shows nothing: its pages are out of reach and their sequence numbers are used
+        again.</li>
+    </ul>
+
+    <p>Neither costs a healthy part a read. When neither can record a retirement &mdash; the table's blocks failing
+       and the block refusing even the mark that would stand in, or a retired block that will not take its mark, so
+       the marks cannot stand in at all &mdash; the log gives the table a pair in the middle of the call that needed
+       it, under the boot's rules, and the retirement goes through the table there; besides those rules, the block
+       being retired and the block a relocation of the head is copying into are never given. The call does at most
+       one debris pass, tries at most <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> pairs and writes the ring's
+       slot once, as any retirement does. Only with no pair anywhere does the log stop, reported exactly as
+       before. Degraded mode also erases, before it lets go of the table, any block below the reserve that carries
+       the table's magic but that the table does not name, so a move a cut stopped can never be loaded later.</p>
+
+    <p>The core keeps the driver honest the other way. Every metadata slot records how many blocks were retired
+       and which of the epoch's own blocks were, and a boot whose table lays the epoch out differently &mdash;
+       fewer retired blocks, or others among the epoch's &mdash; seals the epoch rather than shift positions under
+       pages already written. The one retirement it excuses, the failed head's block whose relocation the slot
+       recorded, it excuses only with the write head at or past the failed page's position: a mark a cut tore can
+       read as none at one boot, which relocates the block again and may itself be cut part-way through the
+       copies, and as a mark at the next, which would otherwise lay the epoch out without the pages left
+       behind. The seal's slot keeps that record rather than the table's, so every later boot finds
+       the same disagreement, and the next epoch begins past every block still holding one of the epoch's pages.</p>
+
+    <p>The hardware LUT holds twenty entries, and the first boot spends one on every factory-bad block it
+       finds, so a part that ships with many leaves that many fewer for blocks that fail in service &mdash;
+       possibly none. Once it is full, a failing block cannot be retired and the log stops taking pages
+       (<code>NANDLOG_ERR_UNWRITABLE</code>) rather than write into it; records it had accepted but not yet
+       committed are counted lost. Nothing in the driver can change that; it is the silicon's capacity. That an
+       entry is written whole or not at all if power fails during the write is the part's to guarantee; the
+       simulator assumes it, and nothing here has checked it on silicon.</p>
+
     <h2>4. Test it</h2>
 
-    <p>Point the host simulator at your driver by editing the <code>SRC</code> line in
-       <code>sim/Makefile</code>, then:</p>
+    <p>Point the host simulator at your driver by adding a configuration to <code>sim/Makefile</code> (the
+       Winbond one is the model to copy), then:</p>
 
 <pre><code>cd sim &amp;&amp; make</code></pre>
 
     <p>The simulator emulates a NAND part at the SPI command level, so your driver runs on it unmodified
        &mdash; addressing, status-register handshakes, busy-waiting and bad-block bookkeeping are all
        exercised. It builds the emulated part from whatever geometry your driver reports, so the two cannot
-       disagree.</p>
+       disagree, and the regression tests and <code>make campaign</code> hold the driver to the same
+       contract as the supplied ones: no repeated programs, a blank test that sees light tears, and a
+       retirement that survives a cut anywhere.</p>
 
-    <p>Then run the three <a href="testing.html">on-device tests</a>. Those cover what the simulator cannot:
+    <p>Then run the <a href="testing.html">on-device tests</a>. Those cover what the simulator cannot:
        whether your column addressing is right on real silicon, whether the internal copy behaves, and what
        the part's on-die ECC does to the spare area.</p>
 

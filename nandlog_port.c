@@ -135,18 +135,68 @@ void nandlog_port_delay_ms(uint32_t milliseconds)
 
 // Failure -------------------------------------------------------------------------------------------------------------
 
-void nandlog_port_fatal(const char *reason)
+NANDLOG_NORETURN void nandlog_port_fatal(const char *reason)
 {
    // The part has stopped answering: BUSY never cleared or a transfer failed past retrying. What happens
-   // next is up to the you: record the reason somewhere that survives, then reset, halt, or carry on
-   // without storage.
+   // next is up to you: record the reason somewhere that survives, then reset or halt.
    //
-   // This is not expected to return. If it does, the caller continues with a chip that is not responding
+   // This must not return, because it is declared noreturn and the compiler may drop the code after a call to it.
+   // To keep running without storage, reset into a configuration that does not initialize the log
+   for (;;)
+      ;
 }
 
 void nandlog_port_unwritable(void)
 {
-   // The softer failure: the part still answers, but no block will retain a page. The log has already
-   // disabled itself and stopped trying, so nothing here is urgent and nothing here should reset the system,
-   // it just has nowhere to put data. Leave a breadcrumb the next boot can find
+   // The softer failure: the part still answers, but no block will retain a page or the epoch is sealed. The log
+   // has already stopped taking records, so nothing here is urgent and nothing here should reset the system.
+   // Leave a breadcrumb the next boot can find, or tell whoever can begin a new epoch
 }
+
+
+// CRC-32 (Optional) ---------------------------------------------------------------------------------------------------
+//
+// Only for a build that sets NANDLOG_PORT_CRC32 to 1, to compute the log's CRCs on a hardware engine. Implement
+// nandlog_port_crc32() to the contract in nandlog_port.h. A wrong CRC makes its page read as damaged, so trust the
+// engine only once it has agreed with nandlog_crc32_software().
+//
+// A sketch for an engine that takes whole 32-bit words from a word-aligned address. engine_run() stands for your
+// engine, seeded with its first argument. Drop the outer complement if the engine applies the final XOR itself:
+//
+//    static bool engine_trusted, engine_checked;
+//
+//    static uint32_t crc_by_engine(uint32_t crc, const uint8_t *bytes, uint32_t length)
+//    {
+//       uint32_t head = (uint32_t)(-(uintptr_t)bytes & 3);             // the software, to the first word boundary
+//       if (head > length)
+//          head = length;
+//       crc = nandlog_crc32_software(crc, bytes, head);
+//       bytes += head;
+//       length -= head;
+//       const uint32_t words = length & ~3u;
+//       if (words)
+//          crc = ~engine_run(~crc, bytes, words);                       // the engine, for the whole words
+//       return nandlog_crc32_software(crc, bytes + words, length - words);   // and the software for the tail
+//    }
+//
+//    bool nandlog_port_init(void)
+//    {
+//       ...
+//       // Once a boot, compare the engine with the software at each alignment and across a split at an odd offset
+//       if (!engine_checked)
+//       {
+//          engine_trusted = (crc_by_engine(0, (const uint8_t*)"123456789", 9) == 0xCBF43926) && ...;
+//          engine_checked = true;
+//       }
+//       return true;
+//    }
+//
+//    uint32_t nandlog_port_crc32(uint32_t crc, const void *data, uint32_t length)
+//    {
+//       if (!engine_trusted || (length < 64))           // a short run costs the software less than the engine's setup
+//          return nandlog_crc32_software(crc, data, length);
+//       return crc_by_engine(crc, (const uint8_t*)data, length);
+//    }
+//
+// An engine that other drivers also use must be shared safely: do not start it while someone else is using it, hold
+// off the scheduler while it runs, and restore any registers it borrowed

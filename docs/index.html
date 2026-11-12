@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Overview &middot; nandlog</title>
-<meta name="description" content="Append-only, power-fail-safe, CRC-validated logging on raw SPI NAND for embedded devices. No flash translation layer, no filesystem, no heap.">
+<meta name="description" content="Append-only, CRC-validated logging on raw SPI NAND for embedded devices, built to keep every committed record across a power cut. No flash translation layer, no filesystem, no heap.">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128190;</text></svg>">
 </head>
@@ -12,7 +12,7 @@
 <a class="skip" href="#content">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="index.html">nandlog</a>
-  <span class="ver">v1.2</span>
+  <span class="ver">v1.0</span>
   <input type="checkbox" id="navtoggle" hidden>
   <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
   <nav class="sidenav">
@@ -24,7 +24,6 @@
     <a href="format.html">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
-    <a href="upgrading.html">Upgrading</a>
   </nav>
 </header>
 <div class="layout">
@@ -37,12 +36,11 @@
     <a href="format.html">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
-    <a href="upgrading.html">Upgrading</a>
   </nav>
   <main id="content">
 <h1>nandlog</h1>
-    <p class="lede">Append-only, power-fail-safe, CRC-validated logging on raw SPI NAND.
-       No flash translation layer, no filesystem, no heap.</p>
+    <p class="lede">Append-only, CRC-validated logging on raw SPI NAND, built to keep every committed record
+       across a power cut. No flash translation layer, no filesystem, no heap.</p>
 
     <p>nandlog is a C99 library for devices that collect data for weeks and hand it over in one go &mdash; a
        battery-powered sensor, a tag, a logger. It assumes writes are small and frequent, reads are rare and
@@ -82,7 +80,7 @@
 
         <line class="seam" x1="20" y1="128" x2="620" y2="128"/>
         <text x="24" y="124" class="mono" style="fill:var(--d-accent)">nandlog_chip.h</text>
-        <text x="616" y="124" text-anchor="end" class="sm">12 functions &mdash; what the log needs from a part</text>
+        <text x="616" y="124" text-anchor="end" class="sm">13 functions &mdash; what the log needs from a part</text>
 
         <rect class="box" x="60" y="138" width="250" height="46" rx="4"/>
         <text x="185" y="158" text-anchor="middle" class="mono">chips/nandlog_chip_AS5F…c</text>
@@ -113,17 +111,117 @@
     <table>
       <thead><tr><th>Capability</th><th>Detail</th></tr></thead>
       <tbody>
-        <tr><td>Static allocation</td><td>About 18&nbsp;kB of RAM on a 4&nbsp;KB-page part, fixed at compile time. No <code>malloc</code>.</td></tr>
-        <tr><td>Power-fail safety</td><td>A page torn by power loss fails its CRC on the next boot and is reported as a gap, never as data.</td></tr>
-        <tr><td>Corruption detection</td><td>Separate CRC-32 over each page header and each payload.</td></tr>
-        <tr><td>Bad-block handling</td><td>Blocks that refuse a write or an erase are retired, and pages already in them are relocated.</td></tr>
-        <tr><td>Fast recovery</td><td>The write head is located in O(log&nbsp;n) page reads after a reboot, without scanning the array.</td></tr>
+        <tr><td>Static allocation</td><td>About 15&nbsp;kB of RAM on a 4&nbsp;KB-page part, fixed at compile time. No <code>malloc</code>.</td></tr>
+        <tr><td>Durability</td><td>A record is durable once the call that committed its page returns, and a power cut at any instant after that &mdash; mid-program, mid-erase, mid-relocation, during the reboot that follows &mdash; must not lose it or deliver it damaged. The simulator holds the library to that at every program and erase; cutting power to a real part is still to come. See <a href="#durability">what survives a power cut</a>.</td></tr>
+        <tr><td>Corruption detection</td><td>Separate CRC-32 over each page header and each payload, and every commit read back and compared byte for byte.</td></tr>
+        <tr><td>Bad-block handling</td><td>Blocks that refuse a write or an erase are retired, and pages already in them are moved and verified. The bad-block table survives a cut at any instant, and one unreadable page. On a part whose reserve cannot hold it, it moves to two blocks of the log region; with none to spare, the blocks' own marks stand in for it. Logging goes on either way.</td></tr>
+        <tr><td>Fast recovery</td><td>The write head is located by a binary search over the log region &mdash; about 90 page reads on an 8&nbsp;Gbit part, all told &mdash; that stays correct with retired blocks, unreadable pages and torn writes in the epoch.</td></tr>
         <tr><td>Bulk offload</td><td>Time-bounded reads, a framed wire format with per-page CRCs, and per-page retransmission.</td></tr>
         <tr><td>Multiple generations</td><td>Epochs, with earlier ones still readable until the write head sweeps over them.</td></tr>
         <tr><td>Bounded work</td><td>Every search loop has a stated bound, so a failing part cannot stall the calling task indefinitely.</td></tr>
+        <tr><td>Nothing dropped silently</td><td><code>nandlog_store_record()</code> says why a record was refused, and running counters say how many were.</td></tr>
       </tbody>
     </table>
     </div>
+
+    <h2 id="durability">What survives a power cut</h2>
+
+    <p>A record is <strong>durable</strong> once the call that committed its page has returned: the
+       <code>nandlog_store_record()</code> whose record did not fit and pushed the previous page out, a
+       <code>nandlog_flush(true)</code>, or a <code>nandlog_begin_epoch()</code> that committed what was
+       buffered. Records still in the RAM page are lost at a cut, as they would be at any reset; flush on a
+       timer to bound that.</p>
+
+    <p>After a cut at any instant, every durable record is delivered intact from the epoch it was logged in,
+       a page the cut tore is reported as a gap, no committed page that still reads is erased, and nothing is
+       programmed a second time &mdash; on every boot after the cut, however a torn page that fails its checks
+       reads on each, and however it later drifts, with the exceptions listed below. And a sequence number is an
+       identity: what a read has served under an epoch and sequence
+       number is what that number holds from then on, or a gap if the part loses the page, never other records
+       &mdash; a read commits whatever is buffered before it opens, so it never serves a page from RAM.</p>
+
+    <p>The simulator's crash-point campaign checks exactly that at every program and erase of fourteen traces,
+       under four models of what a cut does to the operation it lands in, again with a second cut during the
+       reboot and in the logging after it, and then lets every weakly programmed page drift; its fuzzer checks
+       it at random; and a bounded-exhaustive check boots the shipping code over every combination of page
+       states below the write head of a toy part, and cuts every metadata write path at each of its operations
+       (see <a href="testing.html">Testing</a>). <strong>This build has not yet run on a real part</strong>;
+       the on-device power-cut soak in <code>tests/</code> is how that changes, and its results are still to
+       come.</p>
+
+    <p>The limits of that statement:</p>
+    <ul>
+      <li>A page that reads erased in every bit cannot be told from an erased page by any read, so a boot that
+          finds one at the write head programs it again: one a cut stopped before it changed a bit; one the part
+          refused without changing a bit, if the cut also beat the metadata write that records the refusal or
+          every copy of that record is later lost; and a torn page that drifts back to erased before the first
+          boot after its cut has finished listing it. These are the residual second programs. In the log region
+          each lands on the page at the write head, which no read has served, and building with
+          <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code> rules them out there, at a price paid at every boot (see
+          <a href="getting-started.html">Getting started</a>); a metadata or table copy a cut stopped before it
+          changed a bit is still written again, read back and verified, by the next write to its pair.</li>
+      <li>A torn page is listed in the epoch's metadata slot by the first boot that finds it below the write
+          head, before anything is committed after it, and counts as written from then on whatever it reads.
+          A torn page that reads whole &mdash; header, payload and ECC all checking &mdash; cannot be told from a
+          committed one and is taken as one, so a read may serve it though its commit never returned; that it
+          then never drifts is an assumption of the model, as is that a committed page never comes to read
+          erased in every bit.</li>
+      <li>A slot lists up to 880 runs of passed-over positions on a 4&nbsp;KB page, 368 on a 2&nbsp;KB one. An
+          epoch whose list is nearly full is <strong>sealed</strong>: its slot says so, and every later boot
+          refuses records with <code>NANDLOG_ERR_SEALED</code> and calls <code>nandlog_port_unwritable()</code>,
+          until a new epoch is begun. Reads go on.</li>
+      <li>One unreadable page of the metadata ring or the bad-block table changes nothing; each is written
+          twice, and a copy is read once and judged by every checksum it carries. Both copies share a block, so a
+          copy of the newest record read only at the limit of the part's ECC has the boot write that record again,
+          unchanged, in a fresh block (below). If no copy of the newest slot
+          the epoch acted on holds its list whole, the epoch is sealed; if only its details are lost, it goes on
+          without them. If both copies of a slot are lost outright, the boot goes by the slot before it: an epoch
+          begun since is recovered from its own pages, without its details; positions only the lost slot listed
+          are guarded only by the head search's look past the head it finds; and a failed program it recorded
+          may be programmed again if it reads blank.</li>
+      <li>The bad-block table has to lay the epoch out as it was written. The ring records how many blocks are
+          retired and which of the epoch's own blocks are, and a table that differs &mdash; both copies of its
+          newest version lost, or one the recovery utility rebuilt from other marks &mdash; seals the epoch. The
+          epoch begun after it starts past the last block that still holds one of the sealed epoch's pages, as the
+          table now lays them out, so none of them is erased as its window. On the Alliance part every retired
+          block also carries a spare-area mark, which counts only when it reads exactly <code>00h</code>: every boot
+          programs again any that does not; the recovery utility never erases a block that may carry a mark, and
+          reads marks with ECC off.</li>
+      <li>On the Alliance part the table lives in the reserve. If the reserve cannot hold it, a boot gives the
+          driver an aligned pair of blocks from the top of the log region &mdash; outside the current epoch, holding
+          nothing a read could serve &mdash; which are retired and hold the table from then on; later boots find it
+          by one header read a block down to 48 blocks below the reserve. With no such pair, the marks become the
+          record (<em>degraded mode</em>): a retirement is committed by its block's own mark, read back exactly
+          <code>00h</code>, and every boot rebuilds the table from every block's mark, about 1.8&nbsp;s on an
+          8&nbsp;Gbit part. A retirement neither can record &mdash; a block that refuses even its mark &mdash; gets the
+          table a pair in the middle of the call, under the same rules; only with no pair anywhere does the log stop.</li>
+      <li>On the Winbond part a retirement is an entry in the part's own 20-entry remap table, which its
+          factory-bad blocks share. Once it is full a failing block cannot be retired and the log stops taking
+          pages; and that an entry is written whole or not at all across a cut is the part's to guarantee,
+          assumed here and not verified.</li>
+      <li>Corruption that both the part's ECC and CRC-32 miss is outside the model.</li>
+      <li><code>nandlog_port_fatal()</code> must not return, and a retirement's atomicity rests on the part
+          completing a page program or reporting its failure.</li>
+      <li>An earlier epoch is kept only until the write head sweeps over it, and a block of it the window
+          cannot erase is retired, and so no longer read, a little before that.</li>
+    </ul>
+
+    <p>Nothing rewrites a page in place. A page of the log read back corrected only at the limit of the ECC is
+       counted (<code>reads_at_ecc_limit</code>) and left to the part's ECC. The metadata is read far harder:
+       every boot reads about ten pages of the newest ring block and of the newest table block, some five million
+       page reads a year at one boot a minute, and both copies of each record sit in that one block, so wear on the
+       block is wear on both. A boot that reads either copy of the newest ring slot, or of the newest table version,
+       only at the limit of the ECC therefore writes it again, unchanged, into a fresh block, whose erase and
+       program start its pages afresh; and nothing that reads back at the limit counts as written, so a page stuck
+       there costs one boot one write, not every boot. That relies on the part reporting the limit before a page
+       goes past it. The Alliance part reports it when a codeword (512 + 32 B) needed all 8 of its corrections, one
+       bit short of loss: enough for errors that build up between one boot and the next, such as read disturb, but
+       not for those of a long period unpowered, which are left to the part's retention rating. The Winbond part has
+       no such verdict, so on it, and on any part, check the read-disturb rating against the boot rate. The head search's first
+       four probes move from boot to boot &mdash; with the ring's slot numbering, which a clean boot does not
+       change, and with <code>NANDLOG_BOOT_SALT</code>, which a device that boots often should define (a boot
+       counter that survives a reset, or a random number) &mdash; so they do not fall on the same pages every
+       time.</p>
 
     <h2>What it does not do</h2>
 
@@ -146,7 +244,8 @@ nandlog_begin_session();
 nandlog_begin_epoch(&amp;details, sizeof(details));
 nandlog_end_session();
 
-nandlog_store_record(RECORD_SAMPLE, milliseconds, &amp;sample, sizeof(sample));
+if (nandlog_store_record(RECORD_SAMPLE, milliseconds, &amp;sample, sizeof(sample)) != NANDLOG_OK)
+   ;                              /* not stored, and the status says why */
 nandlog_flush(true);</code></pre>
 
     <p>See <a href="getting-started.html">Getting Started</a> for the complete picture, including reading data
@@ -171,8 +270,9 @@ nandlog_flush(true);</code></pre>
 
     <ul>
       <li>A C99 compiler. Build with <code>-fno-strict-aliasing</code>.</li>
+      <li>A little-endian target: the on-flash structures are native integers. A compiler that says otherwise is a build error; one that cannot say is caught by <code>nandlog_init()</code>.</li>
       <li>A SPI NAND part with a power-of-two number of pages per block.</li>
-      <li>Roughly 18&nbsp;kB of RAM for a 4&nbsp;KB-page part, less for a smaller one.</li>
+      <li>Roughly 15&nbsp;kB of RAM for a 4&nbsp;KB-page part, less for a smaller one.</li>
       <li>No RTOS, heap, or filesystem is required. A mutex is required only if more than one thread calls the library.</li>
     </ul>
 

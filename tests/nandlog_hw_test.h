@@ -42,9 +42,16 @@ extern uint32_t hw_checks_run, hw_checks_failed;
 void hw_timing_init(void);
 uint32_t hw_cycles_per_us(void);
 
+#ifdef NANDLOG_HW_TEST_HOST
+uint32_t host_cycle_count(void);             // the simulator's build of the soak (sim/, make soak): a host clock
+#endif
 static inline uint32_t hw_cycle_count(void)
 {
+#ifdef NANDLOG_HW_TEST_HOST
+   return host_cycle_count();
+#else
    return *(volatile uint32_t*)0xE0001004;   // DWT_CYCCNT
+#endif
 }
 
 // Microseconds between two cycle counts, tolerating the counter wrapping once
@@ -69,13 +76,14 @@ void hw_power_down(void);
 // Scratch Area --------------------------------------------------------------------------------------------------------
 
 // Tests that program and erase need somewhere to do it that the log will never place a page in. The top of
-// the reserve is the only such place: the log region stops below it, and the chip driver only ever writes
-// its bad-block marker into the FIRST usable block of the reserve, so the last blocks are unclaimed.
+// the reserve is the only such place: the log region stops below it, and the Alliance driver keeps its
+// bad-block table in the FIRST eight blocks of the reserve, so the top HW_SCRATCH_REGION_BLOCKS are unclaimed.
 //
 // Returns the first page of the n-th scratch block, counting down from the top of the array
 uint32_t hw_scratch_page(uint32_t block_index);
 
 #define HW_SCRATCH_BLOCKS                           4
+#define HW_SCRATCH_REGION_BLOCKS                    8
 
 // Fill a buffer with a pattern that is neither constant nor 0xFF, so a read that returns an erased page, a
 // stale page, or a half-programmed one all look different from a correct one

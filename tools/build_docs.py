@@ -16,7 +16,6 @@ NAV = [
     ("format.html",          "On-Flash Format"),
     ("performance.html",     "Performance"),
     ("testing.html",         "Testing"),
-    ("upgrading.html",       "Upgrading"),
 ]
 
 SHELL = """<!DOCTYPE html>
@@ -33,7 +32,7 @@ SHELL = """<!DOCTYPE html>
 <a class="skip" href="#content">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="index.html">nandlog</a>
-  <span class="ver">v1.2</span>
+  <span class="ver">v1.0</span>
   <input type="checkbox" id="navtoggle" hidden>
   <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
   <nav class="sidenav">{nav}</nav>
