@@ -21,6 +21,7 @@
     <a href="api.html">API Reference</a>
     <a href="porting.html">Porting</a>
     <a href="chips.html">Chip Drivers</a>
+    <a href="durability.html">Durability</a>
     <a href="format.html" class="current" aria-current="page">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
@@ -33,31 +34,56 @@
     <a href="api.html">API Reference</a>
     <a href="porting.html">Porting</a>
     <a href="chips.html">Chip Drivers</a>
+    <a href="durability.html">Durability</a>
     <a href="format.html" class="current" aria-current="page">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
   </nav>
   <main id="content">
 <h1>On-Flash Format</h1>
-    <p class="lede">What nandlog writes, and how to read it without the library.</p>
+    <p class="lede">The bytes nandlog writes to the part and sends over the wire, and how a boot finds its place
+       in them. Read this page if you are writing a parser, a host tool, or a recovery utility.</p>
 
-    <p><code>tools/nandlog_parse.py</code> is the reference reader for everything on this page. CRC-32 uses
-       the IEEE&nbsp;802.3 polynomial, byte-for-byte identical to Python's <code>zlib.crc32</code>.</p>
+    <p>nandlog writes three kinds of structure to the part and defines a fourth for the wire. Every multi-byte
+       field is little-endian, every structure is packed, and every one carries a CRC-32 with the IEEE&nbsp;802.3
+       polynomial, so a host can check it with Python's <code>zlib.crc32</code>.</p>
 
-    <h2>Array layout</h2>
+    <ul>
+      <li><strong>Data pages</strong> fill the log region. Each is a 32-byte header followed by records, up to
+          4,064 bytes of them on a 4&nbsp;KB page.</li>
+      <li><strong>Metadata slots</strong> fill the metadata ring, the first eight blocks. Each slot describes an
+          <strong>epoch</strong>, one generation of the log begun by <code>nandlog_begin_epoch()</code>, and each is
+          written to two pages.</li>
+      <li><strong>The bad-block table</strong> belongs to the chip driver. The Alliance driver keeps it in a reserve
+          at the top of the array, and the Winbond part keeps its own remap table inside the chip.</li>
+      <li><strong>The offload stream</strong> is what a device's firmware sends to a host: a header, then each page
+          with its own framing.</li>
+    </ul>
+
+    <p>Within an epoch, a page's sequence number is its position, so a reader can locate any page without an
+       index, and every gap has a sequence number a host can ask for again. At boot, the log finds the newest slot
+       in the ring and then the <strong>write head</strong>, the position the next page goes to, by reading alone.
+       <code>tools/nandlog_parse.py</code> reads everything on this page, independently of the library.</p>
+
+    <p>If you are writing a parser, read <a href="#layout">Layout</a> through <a href="#parser">Parser</a>. The
+       last two sections, <a href="#newest-epoch">Newest epoch</a> and <a href="#write-head">Write head</a>,
+       describe how a boot recovers and what it reads.</p>
+
+    <h2 id="layout">Layout</h2>
+
+    <p>The array is divided into three regions. The log never writes to the reserve, which belongs to the chip
+       driver.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Region</th><th>Extent</th><th>Contents</th></tr></thead>
+      <thead><tr><th>Region</th><th>Blocks</th><th>Contents</th></tr></thead>
       <tbody>
-        <tr><td>Metadata ring</td><td>the first 8 blocks</td><td>A ring of slots, each describing one epoch</td></tr>
-        <tr><td>Log region</td><td>everything between</td><td>Data pages, written in sequence</td></tr>
-        <tr><td>Reserve</td><td>the top <em>N</em> blocks</td><td>Held by the chip driver: the Alliance driver's 16 hold its bad-block table and on-device test scratch, the Winbond driver's 40 the part's remap spares</td></tr>
+        <tr><td>Metadata ring</td><td>The first 8</td><td>Metadata slots, written in turn</td></tr>
+        <tr><td>Log region</td><td>Everything between</td><td>Data pages, written in sequence</td></tr>
+        <tr><td>Reserve</td><td>The top 16 (Alliance) or 40 (Winbond)</td><td>The Alliance driver's bad-block table and on-device test scratch, or the Winbond part's spare blocks for remapping</td></tr>
       </tbody>
     </table>
     </div>
-
-    <p>All multi-byte fields are little-endian, and all structures are packed with no padding.</p>
 
     <figure>
       <svg class="dia" viewBox="0 0 640 170" role="img" aria-label="The array divided into a metadata ring of eight blocks, a log region, and a reserve at the top.">
@@ -73,11 +99,11 @@
         <text x="64"  y="75" text-anchor="middle" class="sm">epoch slots</text>
         <text x="318" y="61" text-anchor="middle" class="sm">data pages, written in sequence</text>
         <text x="318" y="75" text-anchor="middle" class="sm">the write head sweeps forward and wraps</text>
-        <text x="574" y="61" text-anchor="middle" class="sm">top N blocks</text>
-        <text x="574" y="75" text-anchor="middle" class="sm">bad blocks</text>
+        <text x="574" y="61" text-anchor="middle" class="sm">16 or 40 blocks</text>
+        <text x="574" y="75" text-anchor="middle" class="sm">the driver's own</text>
 
         <text x="20"  y="97" class="mono">block 0</text>
-        <text x="620" y="97" text-anchor="end" class="mono">block N-1</text>
+        <text x="620" y="97" text-anchor="end" class="mono">last block</text>
 
         <path d="M 150 118 L 470 118" style="stroke:var(--d-accent);stroke-width:1.5"/>
         <path d="M 470 118 l -7 -4 l 0 8 z" style="fill:var(--d-accent);stroke:none"/>
@@ -86,67 +112,48 @@
         <path d="M 150 150 l 7 -4 l 0 8 z" style="fill:var(--d-accent);stroke:none"/>
         <text x="310" y="165" text-anchor="middle" class="sm" style="fill:var(--d-accent)">wraps, erasing each block just before it needs it</text>
       </svg>
-      <figcaption><b>Figure 1.</b> The three regions. An earlier epoch is not erased when a new one begins
-        &mdash; it is reclaimed lazily as the head sweeps back around to it.</figcaption>
+      <figcaption><b>Figure 1.</b> The three regions. An earlier epoch is not erased when a new one begins. The
+        head erases its blocks one at a time as it sweeps back around to them.</figcaption>
     </figure>
 
-    <h2>Page header</h2>
+    <p><strong>Positions.</strong> An epoch's positions are the pages of the log region's good blocks, numbered
+       from 0 at the block the epoch began in, and wrapping from the end of the region to its start. A retired
+       block has no positions. A page's sequence number is its position, so the page that holds a given sequence
+       number is found by arithmetic over the list of retired blocks. The driver persists which blocks are retired,
+       so the numbering is the same after every reboot. In an earlier epoch, a block retired since then can shift
+       the positions, so a reader of an old epoch goes by the <code>seq</code> in each header.</p>
 
-    <p>32 bytes at the start of every data page, followed by the payload.</p>
+    <p><strong>Checksums.</strong> Every CRC on this page is the reflected IEEE&nbsp;802.3 CRC-32 (polynomial
+       <code>0xEDB88320</code>, initial value and final XOR <code>0xFFFFFFFF</code>), identical to
+       <code>zlib.crc32</code>. The CRC of zero bytes is 0.</p>
 
-<pre><code>typedef struct __attribute__((__packed__))
-{
-   uint32_t magic;               /* 'TTP1' opaque, or 'TTP2' length-framed      */
-   uint32_t epoch;               /* which generation of the log this belongs to */
-   uint32_t seq;                 /* page index within the epoch, from 0         */
-   uint32_t first_timestamp;     /* smallest record timestamp, or 0xFFFFFFFF    */
-   uint32_t last_timestamp;      /* largest record timestamp, or 0xFFFFFFFF     */
-   uint16_t payload_length;      /* valid payload bytes                         */
-   uint16_t record_count;        /* complete records in the payload             */
-   uint32_t payload_crc;         /* CRC-32 over payload[0 .. payload_length)    */
-   uint32_t header_crc;          /* CRC-32 over this header, excluding itself   */
-} nandlog_page_header_t;</code></pre>
+    <h2 id="page-header">Page header</h2>
+
+    <p>Every data page begins with a 32-byte header, declared in <code>nandlog.h</code> as
+       <code>nandlog_page_header_t</code>. The header has its own CRC, so a reader can trust it before reading the
+       payload. That is why the log can find the write head and resolve time bounds from 32-byte reads.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+      <thead><tr><th>Offset</th><th>Size</th><th>Field</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>NANDLOG_PAGE_MAGIC</code></td><td><code>0x31505454</code> ('TTP1')</td><td>Records are opaque to the log</td></tr>
-        <tr><td><code>NANDLOG_PAGE_MAGIC_FRAMED</code></td><td><code>0x32505454</code> ('TTP2')</td><td>Each record carries its own length</td></tr>
-        <tr><td><code>NANDLOG_NO_TIMESTAMP</code></td><td><code>0xFFFFFFFF</code></td><td>No timestamp recorded</td></tr>
+        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x31505454</code> ('TTP1'): opaque records. <code>0x32505454</code> ('TTP2'): framed records</td></tr>
+        <tr><td>4</td><td>4</td><td><code>epoch</code></td><td>The epoch this page belongs to</td></tr>
+        <tr><td>8</td><td>4</td><td><code>seq</code></td><td>Sequence number within the epoch, from 0</td></tr>
+        <tr><td>12</td><td>4</td><td><code>first_timestamp</code></td><td>Smallest record timestamp in the page, or <code>0xFFFFFFFF</code> if it has no records</td></tr>
+        <tr><td>16</td><td>4</td><td><code>last_timestamp</code></td><td>Largest record timestamp in the page</td></tr>
+        <tr><td>20</td><td>2</td><td><code>payload_length</code></td><td>Payload bytes after the header, 0 only in a tombstone</td></tr>
+        <tr><td>22</td><td>2</td><td><code>record_count</code></td><td>Complete records in the payload</td></tr>
+        <tr><td>24</td><td>4</td><td><code>payload_crc</code></td><td>CRC-32 over the payload</td></tr>
+        <tr><td>28</td><td>4</td><td><code>header_crc</code></td><td>CRC-32 over bytes 0&ndash;27</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>The two timestamps are the smallest and the largest of the page's records, in the caller's units, not
-       those of its first and last record: a record may carry an earlier time than one before it, within
-       <code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code>, and keeps it. A record stamped <code>0xFFFFFFFF</code>
-       counts as <code>0xFFFFFFFE</code> in them. Time-bounded reads select pages by these bounds.</p>
-
-    <p>The two checksums are separate. The header CRC lets a reader trust the length and sequence fields
-       before it has read the payload, which is what makes a header-only read meaningful.</p>
-
-    <p>A page is <strong>valid</strong> when its magic is one of the two values, its header CRC matches, and
-       its <code>payload_length</code> does not exceed what a page can hold. A valid page whose payload CRC
-       does not match is reported as a <strong>gap</strong>: a zero-length page carrying its own sequence
-       number, not the end of the log.</p>
-
-    <p>Within an epoch, <strong>a page's sequence number is its position</strong>: the index of its page among
-       the pages of good blocks, counting from the block the epoch began in and wrapping from the end of the
-       log region to its start. Retired blocks have no positions. That is what makes a sequence number
-       something a reader can find without a map.</p>
-
-    <h3>Tombstones</h3>
-
-    <p>A page is only ever committed with something in it, so a valid page with <code>payload_length = 0</code>
-       is a <strong>tombstone</strong>. The log writes one in exactly one situation: a block fails, its pages
-       are moved to the next good block, and one of them was already unreadable. The tombstone carries that
-       page's epoch and sequence number, <code>NANDLOG_NO_TIMESTAMP</code> for both times, no records, and the
-       CRC of an empty payload. It reads back as the gap the page already was, and it keeps the position
-       occupied so it can never be mistaken for the write head.</p>
+    <p>The payload starts at offset 32, and the rest of the page reads <code>FFh</code>.</p>
 
     <figure>
-      <svg class="dia" viewBox="0 0 640 210" role="img" aria-label="A page: a 32-byte header of ten fields followed by the payload.">
+      <svg class="dia" viewBox="0 0 640 210" role="img" aria-label="A page: a 32-byte header of nine fields followed by the payload.">
         <rect class="accent" x="20"  y="44" width="190" height="34"/>
         <rect class="box"    x="210" y="44" width="410" height="34"/>
         <text x="115" y="66"  text-anchor="middle" class="mono">32-byte header</text>
@@ -196,244 +203,244 @@
         <path d="M 468 193 L 620 193" style="stroke:var(--d-accent)"/>
         <text x="544" y="208" text-anchor="middle" class="sm" style="fill:var(--d-accent)">two checksums, deliberately</text>
       </svg>
-      <figcaption><b>Figure 2.</b> A data page. Two separate checksums: the header CRC lets a reader trust
-        <code>seq</code>, <code>payload_length</code> and the timestamps <em>before</em> reading the payload,
-        which is what makes a 32-byte structural read meaningful.</figcaption>
+      <figcaption><b>Figure 2.</b> A data page. Because the header has its own CRC, a reader can trust
+        <code>seq</code>, <code>payload_length</code>, and the timestamps <em>before</em> it reads the payload, so
+        a 32-byte read is enough to place a page.</figcaption>
     </figure>
 
-    <h2>Record framing</h2>
+    <p><strong>Validity.</strong> A page is <strong>valid</strong> when its magic is one of the two values, its
+       header CRC matches, and its <code>payload_length</code> is no more than the page size less 32. A valid page
+       whose payload CRC fails, or which the part cannot correct, is a <strong>gap</strong>. The library serves a
+       gap as a zero-length page that carries its sequence number, and a gap is never the end of the log.</p>
 
-    <p>A page announces which format it is in through its magic, so a log spanning a firmware change parses
-       correctly page by page.</p>
+    <p><strong>Timestamps.</strong> The two time fields are the smallest and the largest timestamps of the page's
+       records, in the caller's units, which the log never interprets. They need not be those of the first and last
+       records, because a record may carry an earlier time than the one before it, and keeps it. A record that steps
+       back by more than <code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code> (250 by default) from the page's largest
+       timestamp starts a new page instead. A record stamped <code>0xFFFFFFFF</code> keeps that stamp, but counts as
+       <code>0xFFFFFFFE</code> in its page's bounds, so <code>0xFFFFFFFF</code> in a header always means that the page
+       has no records. Time-bounded reads select pages by these two fields.</p>
 
-    <h3>Framed (<code>TTP2</code>, the default)</h3>
+    <h2 id="tombstones">Tombstones</h2>
+
+    <p>A page is only ever committed with records in it, so a valid page with <code>payload_length</code> 0 is a
+       <strong>tombstone</strong>. A tombstone keeps a position occupied when its page cannot be kept, so the
+       position reads as a gap and can never be taken for the write head. The log writes one in two cases:</p>
+
+    <ul>
+      <li><strong>Relocation.</strong> When a block fails, the log moves the epoch's pages in it to the next good
+          block. A page that does not read as this epoch's page for its position goes over as a tombstone.</li>
+      <li><strong>A distrusted block at boot.</strong> When nothing below the write head in its block reads whole,
+          the boot may erase the block again and write a tombstone at each of those positions (see
+          <a href="#write-head">Write head</a>).</li>
+    </ul>
+
+    <p>A tombstone carries the build's magic, the epoch, the position's sequence number, <code>0xFFFFFFFF</code> for
+       both timestamps, 0 for the length and the record count, and 0 for <code>payload_crc</code>, which is the CRC
+       of no bytes.</p>
+
+    <h2 id="framing">Record framing</h2>
+
+    <p>A page's magic says how its records are laid out, so a log that spans a firmware change parses correctly page
+       by page. Records are never split across pages, and <code>nandlog_store_record()</code> refuses a record that
+       cannot fit in an empty page with <code>NANDLOG_ERR_TOO_LARGE</code>.</p>
+
+    <p><strong>Framed ('TTP2', the default).</strong> With <code>NANDLOG_RECORD_FRAMING</code> on, each record
+       is:</p>
 
 <pre><code>[data length: 2][record type: 1][timestamp: 4][data: data length]</code></pre>
 
-    <p>The length is little-endian and counts the data only, not the type or timestamp byte. A reader can
-       walk a page without knowing the application's record types. The prefixes are authoritative for
-       stepping in both directions: a record that decodes is still advanced past by its declared length, and
-       a record the reader does not recognise is stepped over exactly.</p>
+    <p>The length is little-endian and counts the data only. A reader steps from record to record by the length
+       alone, so it can walk a page, and skip a record type it does not recognize, without knowing the application's
+       types. <code>nandlog_framed_next_record()</code> does this on the device, and stops at a record that would run
+       past the payload.</p>
 
-    <h3>Opaque (<code>TTP1</code>)</h3>
+    <p><strong>Opaque ('TTP1').</strong> With framing off, each record is:</p>
 
 <pre><code>[record type: 1][timestamp: 4][data]</code></pre>
 
-    <p>With <code>NANDLOG_RECORD_FRAMING</code> off, a record's extent is a property of the application that
-       wrote it. The payload is handed back whole and cannot be split by a generic reader.</p>
+    <p>Only the application that wrote the records knows where each ends, so a generic reader hands the payload back
+       whole. A framed record takes 7 bytes more than its data and an opaque one 5, so on a 4&nbsp;KB page a single
+       framed record holds at most 4,057 bytes of data.</p>
 
-    <p>Records are never split across pages. A record larger than
-       <code>nandlog_data_bytes_per_page()</code> is dropped.</p>
+    <h2 id="metadata-slot">Metadata slot</h2>
 
-    <h2>Metadata slot</h2>
+    <p>A metadata slot records an epoch: where it began, the caller's details for it, and what the log has learned
+       about it since, such as positions it passed over or a page that failed. The log writes a slot when an epoch
+       begins, and writes the current epoch's slot again whenever that record changes or a boot finds it unsettled.
+       Each slot goes to both pages
+       of a pair, an even page of a ring block and the odd page after it, so one unreadable page never loses it.
+       <code>nandlog.h</code> declares bytes 0&ndash;31 as <code>nandlog_meta_header_t</code> and bytes 32&ndash;63
+       as <code>nandlog_meta_extension_t</code>.</p>
 
-    <p>One per epoch, in a slot of the metadata ring: the header, a 32-byte extension, the caller's details
-       blob, then the list of positions the epoch has passed over &mdash; the whole slot written
-       <strong>twice</strong>, to an even page of a ring block and the odd page after it. The digits in the
-       magics <code>'TTM2'</code> and <code>'BBT3'</code> are part of the tags, not versions; the version of
-       the format, the first, is <code>format_version</code>.</p>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Offset</th><th>Size</th><th>Field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x324D5454</code> ('TTM2')</td></tr>
+        <tr><td>4</td><td>4</td><td><code>epoch</code></td><td>The epoch this slot describes</td></tr>
+        <tr><td>8</td><td>4</td><td><code>log_start_page</code></td><td>First page of the block the epoch began in</td></tr>
+        <tr><td>12</td><td>4</td><td><code>created_timestamp</code></td><td>Always 0, since the log reads no clock</td></tr>
+        <tr><td>16</td><td>2</td><td><code>details_length</code></td><td>Bytes of caller-defined details</td></tr>
+        <tr><td>18</td><td>2</td><td><code>format_version</code></td><td><code>NANDLOG_FORMAT_VERSION</code>: 1</td></tr>
+        <tr><td>20</td><td>4</td><td><code>details_crc</code></td><td>CRC-32 over the details</td></tr>
+        <tr><td>24</td><td>4</td><td><code>header_crc</code></td><td>CRC-32 over bytes 0&ndash;23</td></tr>
+        <tr><td>28</td><td>4</td><td><code>reserved</code></td><td><code>0xFFFFFFFF</code>, not covered by <code>header_crc</code></td></tr>
+        <tr><td>32</td><td>4</td><td><code>sequence</code></td><td>One more than the slot written before it, anywhere in the ring</td></tr>
+        <tr><td>36</td><td>4</td><td><code>head_failed_page</code></td><td><code>0xFFFFFFFF</code>, or a write-head page whose program failed or did not read back</td></tr>
+        <tr><td>40</td><td>4</td><td><code>retired_blocks</code></td><td>Retired blocks in the ring and log region when the slot was written</td></tr>
+        <tr><td>44</td><td>4</td><td><code>span_retired</code></td><td>Fingerprint of which of the epoch's blocks are retired</td></tr>
+        <tr><td>48</td><td>2</td><td><code>span_blocks</code></td><td>Blocks from the epoch's first through the one holding its newest page, or 0</td></tr>
+        <tr><td>50</td><td>1</td><td><code>zero</code></td><td>0</td></tr>
+        <tr><td>51</td><td>1</td><td><code>sealed</code></td><td><code>0xFF</code>, or 0 once the epoch is sealed</td></tr>
+        <tr><td>52</td><td>2</td><td><code>passed_over_count</code></td><td>Runs in the passed-over list</td></tr>
+        <tr><td>54</td><td>2</td><td><code>reserved</code></td><td><code>0xFFFF</code></td></tr>
+        <tr><td>56</td><td>4</td><td><code>passed_over_crc</code></td><td>CRC-32 over the passed-over list</td></tr>
+        <tr><td>60</td><td>4</td><td><code>extension_crc</code></td><td>CRC-32 over bytes 0&ndash;59</td></tr>
+        <tr><td>64</td><td><code>details_length</code></td><td>details</td><td>The caller's blob</td></tr>
+        <tr><td>64 + details</td><td>4 per run</td><td>passed-over list</td><td>Runs of positions, below</td></tr>
+      </tbody>
+    </table>
+    </div>
 
-<pre><code>typedef struct __attribute__((__packed__))
-{
-   uint32_t magic;               /* 'TTM2' = 0x324D5454                         */
-   uint32_t epoch;               /* the generation this slot describes          */
-   uint32_t log_start_page;      /* first page of the block the epoch began in  */
-   uint32_t created_timestamp;   /* always 0: the log reads no clock            */
-   uint16_t details_length;      /* bytes of caller-defined details             */
-   uint16_t format_version;      /* NANDLOG_FORMAT_VERSION: 1                   */
-   uint32_t details_crc;         /* CRC-32 over the details blob                */
-   uint32_t header_crc;          /* CRC-32 over this header, excluding the      */
-                                 /*   trailing two words                        */
-   uint32_t reserved;            /* 0xFFFFFFFF                                  */
-} nandlog_meta_header_t;
+    <p>The rest of the page reads <code>FFh</code>.</p>
 
-typedef struct __attribute__((__packed__))   /* straight after it           */
-{
-   uint32_t sequence;            /* one more than the slot written before it    */
-   uint32_t head_failed_page;    /* 0xFFFFFFFF, or see below                    */
-   uint32_t retired_blocks;      /* blocks retired when the slot was written    */
-   uint32_t span_retired;        /* which of the epoch's blocks were, see below */
-   uint16_t span_blocks;         /* blocks the epoch's written pages span       */
-   uint8_t  zero;                /* 0                                           */
-   uint8_t  sealed;              /* 0xFF; 0 once the epoch takes no more pages  */
-   uint16_t passed_over_count;   /* runs in the passed-over list                */
-   uint16_t reserved;            /* 0xFFFF                                      */
-   uint32_t passed_over_crc;     /* CRC-32 over that list                       */
-   uint32_t extension_crc;       /* CRC-32 over the header and the extension    */
-                                 /*   up to this field                          */
-} nandlog_meta_extension_t;      /* the details follow, at byte 64, then the list */</code></pre>
+    <p><strong>Validity.</strong> A copy is <strong>valid</strong> when its magic, header CRC, and extension CRC
+       hold, its <code>log_start_page</code> begins a block of the log region, and its details leave room for at least
+       64 runs of the list. It is <strong>whole</strong> when its details CRC and list CRC hold too. The details are
+       limited by what the page holds, not by the reading build's <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>, so a
+       slot written under a larger limit is still found.</p>
 
-    <p>Sequence 0 is at <code>log_start_page</code>, or in the next good block if that block has since been
-       retired. A slot is valid when its magic, header CRC and extension CRC are. A copy is
-       <strong>whole</strong> when its details CRC and its list CRC hold as well. Its details and list are held
-       only to fitting the page, not to the reading build's <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>, so a log
-       written under another value is still found; an epoch whose slot then carries more than the reading build
-       allows is sealed, below.</p>
+    <p><strong>Passed-over list.</strong> A <strong>passed-over position</strong> is one the log will never program,
+       because a boot found that its page would not read whole. A <strong>torn page</strong>, one a power cut
+       interrupted, is the usual case. The list holds ascending runs, one 32-bit word each: the run's first position in
+       bits 0&ndash;23 and its length less one in bits 24&ndash;31. A listed position counts as written, whatever its
+       page reads later. The list has room for (page size &minus; 64 &minus; <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>)
+       / 4 runs, at most 1,024: 880 on a 4&nbsp;KB page and 368 on a 2&nbsp;KB page, with the default 512 bytes of
+       details.</p>
 
-    <p>A copy is read <strong>once</strong>, header, extension, details and list in a single read of the page,
-       into an image in RAM, and judged by every checksum it carries: whole; valid with its list but not its
-       details; valid without its list; or not a slot. That image, and never a second read of the page, is what a
-       boot decides by and what every slot written from it is made of, because a page a cut tore can read
-       differently from one read to the next. No slot is programmed that fails its own checksums, and the
-       second copy of a pair is programmed only after the first has been read back and its checksum agrees.</p>
+    <p><strong>Failed head.</strong> <code>head_failed_page</code> names a write-head page whose program failed or
+       did not read back. The log records it before it does anything else about the failure, and carries it into every
+       later slot of the epoch. Such a page may hold charge that no read can see, so a boot whose head is still in that
+       block, unretired, moves the block's pages before it programs anything.</p>
 
-    <p>The <strong>passed-over list</strong> follows the details: runs of consecutive positions, in ascending
-       order, one little-endian 32-bit word each &mdash; the run's first position in bits 0&ndash;23, its length
-       less one in bits 24&ndash;31. A listed position counts as written, whatever its page reads; see
-       <a href="#finding-the-write-head">finding the write head</a>.</p>
+    <p><strong>Layout record.</strong> Positions are laid out over the blocks the driver calls good, so
+       <code>retired_blocks</code>, <code>span_blocks</code>, and <code>span_retired</code> record the layout the slot
+       was written under. <code>span_retired</code> is the 32-bit sum, over each retired block among the epoch's first
+       <code>span_blocks</code> blocks, of the CRC-32 of that block's 32-bit offset from the epoch's first block. A boot
+       whose table names fewer retired blocks, or other ones under the epoch, would lay the pages out differently, so it
+       seals the epoch and keeps the slot's original record. The one exception is the block of a recorded failed head,
+       whose retirement completes a relocation the slot recorded, once the head stands at or past the failed page.</p>
 
-    <p><code>head_failed_page</code> names the write head's page when a program there failed or would not read
-       back. It is written before anything else is done about the failure, and carried in every later slot of
-       the epoch. Such a page may hold charge no read can see, so a boot whose head is still in that page's block,
-       unretired, moves the block's pages before it programs anything; if there is nowhere to move them, the
-       region stays full.</p>
+    <p><strong>Seal.</strong> A <strong>sealed</strong> epoch takes no more pages. Every later boot reads the seal,
+       refuses records with <code>NANDLOG_ERR_SEALED</code>, and calls <code>nandlog_port_unwritable()</code>, until a
+       new epoch begins, but the epoch's pages can still be read. A boot seals the epoch, in its slot, in four
+       cases:</p>
 
-    <p><code>retired_blocks</code> is how many blocks the log knew to be retired when the slot was written;
-       <code>span_blocks</code> is how many blocks, from the epoch's first, its written pages reach into, and
-       <code>span_retired</code> the sum, over each of those blocks that was retired, of the CRC-32 of its 32-bit
-       offset from the epoch's first block. They are written again whenever a block is retired. Positions are laid
-       out over the blocks the driver calls good, so a boot whose table names fewer retired blocks, or other ones
-       among the epoch's &mdash; but for the block of a recorded failed head, whose retirement completes a
-       relocation the slot recorded before it began, once the write head stands at or past the failed page's
-       position &mdash; would lay the epoch's pages out differently. It seals the epoch instead, and writes the seal
-       into the slot.</p>
+    <ul>
+      <li>The passed-over list is within four runs of what the slot can hold.</li>
+      <li>The newest slot the epoch acted on has lost its list in both copies (see
+          <a href="#newest-epoch">Newest epoch</a>).</li>
+      <li>The table lays the epoch out differently from the slot's record, or the head search finds a page of the
+          epoch below its own sequence number, which means a block under committed pages was retired without the
+          log.</li>
+      <li>The slot's details are longer than the reading build's <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>.</li>
+    </ul>
 
-    <p><code>sealed</code> is 0 once an epoch takes no more pages: its list is within a few runs of what the
-       slot can hold (880 runs on a 4&nbsp;KB page, 368 on a 2&nbsp;KB one, at 512 bytes of details), its newest
-       slot no longer reads with the list whole, the table disagrees as above, or its details are longer than the
-       reading build allows. Every later boot reads the seal and refuses records
-       (<code>NANDLOG_ERR_SEALED</code>); only a new epoch, whose slot starts unsealed, ends it.</p>
+    <h2 id="bad-block-table">Bad-block table</h2>
 
-    <h3>Finding the newest epoch</h3>
+    <p>Which blocks are retired, and so which pages have positions, is the chip driver's business rather than part
+       of this format. A parser of a raw dump still needs it, to tell the live copy of a relocated page from the stale
+       original. This section describes the Alliance driver's table. The Winbond part remaps a retired block in a
+       lookup table inside the chip, so a Winbond dump carries no table (see
+       <a href="durability.html#bad-blocks">Durability</a>).</p>
 
-    <p>The ring is eight blocks used in turn. A block is entered by erasing it and programming its first pair,
-       fills it strictly in order, and abandons it at the first pair that is not blank or will not take a
-       program. A boot therefore reads the first slot of each block, takes the block whose first slot has the
-       highest sequence number, binary-searches that block for the end
-       of what was written, and takes its newest slot: the last pair one copy of which is whole, or, below that
-       pair, the last pair either copy of which is valid with its list &mdash; a pair before the last of a block
-       was verified twice when it was written, and acted on. If neither copy of such a pair holds its list any
-       more, going by an older slot would undo what it recorded, so the boot keeps its header and seals the
-       epoch; if only the details are lost, the epoch goes on without them. A block with no usable pair gives way
-       to the block entered before it. One page that becomes unreadable never costs a slot, nor the details.</p>
+    <p>Each version of the Alliance table is one page:</p>
 
-    <p>A slot is <strong>settled</strong> when both its copies are whole and read with margin, and nothing has
-       been written after it, there or as the first page of the block the ring enters next. One that is not is
-       what a cut in a slot's write leaves, and a page a cut tore can read valid on one boot and not on the next,
-       or come out with a header that checks over details that do not. So before a boot erases or programs
-       anything in the log region, it writes the slot it went by again, from a whole copy, as a new pair in a
-       block of its own, numbered past anything the torn slot could claim; every later boot then goes by the same
-       slot. If no pair anywhere takes both copies, a first copy that verified stands as the slot, and the epoch
-       is reported begun.</p>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Offset</th><th>Size</th><th>Field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>4</td><td><code>magic</code></td><td>The ASCII bytes <code>BBT3</code></td></tr>
+        <tr><td>4</td><td>4</td><td><code>crc</code></td><td>CRC-32 over byte 8 through the last entry</td></tr>
+        <tr><td>8</td><td>4</td><td><code>version</code></td><td>One more than the version it replaces</td></tr>
+        <tr><td>12</td><td>4</td><td><code>count</code></td><td>Entries that follow, at most 256</td></tr>
+        <tr><td>16</td><td>4 per entry</td><td>entries</td><td>The first page of each retired block</td></tr>
+      </tbody>
+    </table>
+    </div>
 
-    <p>The two copies of a slot share a block, and so its wear. Every boot reads about ten pages of the newest
-       ring block, and a boot that finds its slot settled writes nothing, so at one boot a minute that block is
-       read some five million times a year; read disturb, or anything else that wears the block, wears both copies
-       together, and the second is no independent spare for the first. A copy the part reports corrected only at
-       the limit of its ECC (<code>NANDLOG_READ_AT_ECC_LIMIT</code>) is still whole, and the boot goes by it as by
-       any whole copy &mdash; the verdict never changes which slot is chosen &mdash; but it leaves the slot
-       unsettled, and the boot writes the slot again exactly as it would a torn one: the same epoch, details and
-       list, numbered on, as the first pair of the next ring block, whose erase and program start its pages afresh.
-       The page that read at the limit is then no copy of the newest slot, and nothing it reads decides anything.
-       A copy is never written to a page that reads back at the limit, so a page stuck there costs one boot one
-       erase and two programs, not every boot.</p>
+    <p>The rest of the page reads <code>FFh</code>. The rules a reader needs:</p>
 
-    <p>Should every copy of the newest slot become unreadable, the epoch it began still names itself in its own
-       pages. Before it acts on the slot it found &mdash; sealed or not, its list whole or not &mdash; a boot reads
-       the first page of the head's block and of the blocks after it, as far as a window
-       reaches; a valid page of a newer epoch there, with sequence number <var>s</var>, fixes where that epoch
-       began &mdash; <var>s</var> good positions before it &mdash; whether or not it has since swept round to the
-       older epoch's first block. A block whose first page does not read is read on, page by page, to the first
-       that does. The boot carries on with the newer epoch and writes it a new slot, without the caller's
-       details, rather than erase it as the older epoch's window.</p>
+    <ul>
+      <li><strong>Where.</strong> The table rotates over the first eight blocks of the reserve. Each version goes to
+          both pages of the next pair, and a full block hands on to the next, which is erased first. Each copy is judged
+          from one read, header and entries together, because a torn page can read differently from one read to the
+          next.</li>
+      <li><strong>Newest.</strong> A boot dates each table block by the first version in it that reads, and loads the
+          newest block's last pair that has a readable copy, falling back to older blocks if it has none.</li>
+      <li><strong>Marks.</strong> Every block the table names also carries a mark: <code>00h</code> in the first byte
+          of its first page's spare area, where the factory marks bad blocks. Marks are read with ECC off. A mark counts
+          only when it reads exactly <code>00h</code>, so every boot programs again any entry's mark that does not.
+          Because a power cut can leave a mark part-programmed, any byte but <code>FFh</code> may be one: the driver
+          never erases such a block or takes it for a table block, and passes over any version in it.</li>
+      <li><strong>A stray bit.</strong> Read disturb can program one bit of a mark. A reserve block whose mark reads a
+          single programmed bit is therefore read as unmarked if it holds a version newer than the one loaded that does
+          not name it, and the boot writes that version again into a fresh block.</li>
+      <li><strong>Settling.</strong> The newest version is settled when both its copies read with margin and nothing
+          was written after it. Otherwise the boot writes the same entries again, as a new version in a fresh block,
+          before the log lays out any position.</li>
+      <li><strong>Rebuild.</strong> If no version loads, the driver rebuilds the table from the marks, taking any byte
+          but <code>FFh</code> as a mark, and writes it. <code>nandlog_reset_bad_block_table()</code> forces this, after
+          programming every entry's mark again and checking that each reads <code>00h</code>. The driver writes
+          <code>BBT2</code> to page 4 of the part's OTP area once a table exists, so a later rebuild is reported as a
+          lost table.</li>
+      <li><strong>When the reserve cannot hold it.</strong> The log gives the driver an aligned pair of blocks from the
+          top of the log region, outside the current epoch and holding no valid page. Every version written there names
+          both blocks as retired, and they are the only entries without a mark, because a mark would hide their
+          versions. A boot looks for them only when no reserve block holds a version, with one or two header reads a
+          block, down to 48 blocks below the reserve.</li>
+      <li><strong>Degraded mode.</strong> With no pair to be had, the driver makes every block that holds a version
+          yield none, and the marks alone record retired blocks. Every boot then rebuilds the table from the marks,
+          until a boot can give the table a pair.</li>
+    </ul>
 
-    <h3 id="finding-the-write-head">Finding the write head</h3>
+    <p>A reader of a raw dump that has no table recognizes the stale copies a relocation leaves in a retired block by
+       keeping one copy of each (epoch, sequence number).</p>
 
-    <p>Each position of the current epoch is classified: <strong>inside</strong> if the epoch's slot lists it
-       as passed over, or if it holds a valid header of the epoch whose sequence number is that position;
-       <strong>outside</strong> if it is blank &mdash; every bit, main and spare, reads erased with ECC bypassed
-       &mdash; or holds any other valid header; and <strong>unknown</strong> otherwise, taking the class of the
-       nearest classifiable position below it. The write paths keep three things true at every instant a cut
-       can land: every position below the head is listed or not blank and, if it holds a valid header of the
-       epoch, that header's sequence number is its position; the head's own page is blank and not listed; and
-       nothing at or above the head is listed or holds a valid header of the epoch at its own position. So the
-       classification is exactly "below the head", and a binary search over the positions finds it.</p>
+    <h2 id="wire-format">Wire format</h2>
 
-    <p>Only a blank, unlisted page counts as evidence of being past the head. A retired block has no positions;
-       an unreadable page and a page a cut tore are unknown and count as inside. The first boot to find pages
-       directly below the head that do not read <strong>whole</strong> &mdash; header, payload and ECC all
-       checking &mdash; lists them in the epoch's slot, and writes that slot before it commits anything after
-       them: their sequence numbers stay consumed, nothing programs them again, and a torn page whose few charged
-       cells later drift back to erased is still inside. A torn page that reads whole cannot be told from a
-       committed one, and is taken as committed. The search also looks a block's worth past its answer, over
-       unreadable pages, for a page of the epoch, so a committed page that came to read blank &mdash; a retention
-       failure, outside the model &mdash; does not pull the head back while pages after it read. See the comment
-       above <code>recover_write_head()</code> in <code>nandlog.c</code> for how each write path keeps the three
-       conditions.</p>
+    <p>The offload stream is how a device sends an epoch to a host. <code>nandlog.h</code> defines its two
+       structures, <code>nandlog_stream_header_t</code> and <code>nandlog_wire_page_t</code>, and the device's firmware
+       writes them from what <code>nandlog_read_span()</code> and <code>nandlog_retrieve_next_page()</code> report. A
+       stream is a 16-byte header, the caller's details, then a 20-byte frame and its payload for each page.</p>
 
-    <p>Below the answer the search gives, the boot reads each position again, once, and only a page of the epoch
-       that reads whole ends the run it passes over: a position that now reads blank, or as another epoch's,
-       contradicts the search &mdash; the remains of an interrupted erase can read one way and then the other
-       &mdash; and is passed over rather than trusted. When nothing below the head in its block reads whole, the
-       block is not trusted as it stands: its listed positions may be pages the epoch tore, or what an
-       interrupted erase left. The boot lists them, then erases
-       the block again and writes a tombstone at each &mdash; and a boot that finds such a block again, because a
-       cut stopped that erase, does it again. A build with <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code> also lists
-       the head's own page whenever the head is part-way into a block, and moves the head past it.</p>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Offset</th><th>Size</th><th>Stream header field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x31535454</code> ('TTS1')</td></tr>
+        <tr><td>4</td><td>2</td><td><code>record_format</code></td><td>1 opaque, 2 framed</td></tr>
+        <tr><td>6</td><td>2</td><td><code>details_length</code></td><td>Bytes of details that follow the header</td></tr>
+        <tr><td>8</td><td>4</td><td><code>total_pages</code></td><td>Pages that will be sent, gaps included</td></tr>
+        <tr><td>12</td><td>4</td><td><code>total_payload_bytes</code></td><td>Sum of their payload lengths</td></tr>
+      </tbody>
+    </table>
+    </div>
 
-    <h3>The bad-block table</h3>
-
-    <p>Which blocks are retired, and so which pages have positions, is the chip driver's business and not
-       part of this format. The Alliance driver keeps it in the first eight blocks of the reserve (or, below, in a pair of
-       blocks the log gave up) as pages of
-       <code>'BBT3'</code>, a CRC-32 over the rest, a version, a count, and the first page of each retired
-       block, each version written to a pair of pages exactly as a metadata slot is. Each copy is judged from one
-       read of it, version and entries together, since a page a cut tore can read differently from one read to
-       the next. A boot takes the newest version either copy of which reads, from the newest block that holds one; it is settled only when both
-       copies read, with margin, and nothing was written after it, and a boot settles a torn version the same way,
-       before the log lays out a single position over it. Both copies share a block, which every boot reads, so a
-       copy the part corrects only at the limit of its ECC leaves the version unsettled too: the table is loaded
-       from it, and the same entries are written again, as a new version in a fresh block. No version counts as
-       written whose read-back the part corrects only at the limit. Every block the table names also carries a <code>00h</code> mark
-       at the start of its first page's spare area, from which the table is rebuilt if every copy is lost. Marks
-       are read with ECC off, as the cells are. A mark a cut left part-way can read as a mark once and as none the
-       next time, so a mark counts as written only when it reads exactly <code>00h</code>: every boot programs
-       again each entry's mark that does not, and the recovery utility programs every mark once more and requires
-       each to read <code>00h</code> before it erases anything. The utility never erases a block that may carry a
-       mark &mdash; any byte but <code>FFh</code> there &mdash; and a table candidate block that may carry one is
-       passed over whatever versions it holds, but for one stray bit: a block of the reserve whose mark reads one
-       programmed bit, holding a version newer than the one loaded without it, which that version does not name, is
-       read as unmarked, and the boot writes that version again into a fresh block. A rebuild from the marks takes any byte but <code>FFh</code> for a
-       mark, as the datasheet has software do. A reader of a raw dump without the table recognises the stale copies a relocation leaves in a retired block by keeping
-       one copy of each sequence number.</p>
-
-    <p>On a part whose reserve cannot hold the table, the same pages go to an aligned pair of blocks below the
-       reserve that the log gave up; every version written there names both blocks as retired, so the format of
-       a version is unchanged and a reader finds the table by its magic wherever it is. The two blocks are the one
-       kind of entry that carries no mark, since a mark is what makes a block's versions be passed over. With no
-       pair to be had, no block holds a version that can be loaded &mdash; each is marked &mdash; and the marks
-       themselves are the record of retired blocks until a boot finds the table a pair.</p>
-
-    <h2>Offload wire format</h2>
-
-    <p>A stream is a header, the caller's details blob, then each page framed with its own metadata.</p>
-
-<pre><code>Header:
-  u32   magic                'TTS1' = 0x31535454
-  u16   record_format        1 opaque, 2 framed
-  u16   details_length
-  u32   total_pages          including any zero-length gaps
-  u32   total_payload_bytes  sum of all payload lengths
-  u8[]  details              details_length bytes
-
-Then, per page:
-  u32   seq
-  u32   first_timestamp
-  u32   last_timestamp
-  u16   payload_length       0 means the device could not read this page
-  u16   record_count
-  u32   payload_crc
-  u8[]  payload              payload_length bytes</code></pre>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Offset</th><th>Size</th><th>Page frame field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>4</td><td><code>seq</code></td><td>The page's sequence number</td></tr>
+        <tr><td>4</td><td>4</td><td><code>first_timestamp</code></td><td>As in the page header</td></tr>
+        <tr><td>8</td><td>4</td><td><code>last_timestamp</code></td><td>As in the page header</td></tr>
+        <tr><td>12</td><td>2</td><td><code>payload_length</code></td><td>Payload bytes that follow, or 0 if the device could not read this page</td></tr>
+        <tr><td>14</td><td>2</td><td><code>record_count</code></td><td>As in the page header</td></tr>
+        <tr><td>16</td><td>4</td><td><code>payload_crc</code></td><td>CRC-32 over the payload that follows</td></tr>
+      </tbody>
+    </table>
+    </div>
 
     <figure>
       <svg class="dia" viewBox="0 0 640 150" role="img" aria-label="An offload stream: a header, the details blob, then one frame per page, with a gap frame carrying zero payload.">
@@ -462,56 +469,208 @@ Then, per page:
         <text x="296" y="104" text-anchor="end" class="sm">the device could not read this page, but its</text>
         <text x="296" y="118" text-anchor="end" class="sm">seq is still reported, so the host can ask again</text>
       </svg>
-      <figcaption><b>Figure 3.</b> An offload stream. A page that fails its CRC on the device is still
-        emitted, as a frame with zero payload, so a gap is explicit at a known sequence number rather than
-        silently absent.</figcaption>
+      <figcaption><b>Figure 3.</b> An offload stream, with a gap at frame 1.</figcaption>
     </figure>
 
-    <p>A page that fails its CRC on the device is <strong>still emitted</strong>, with
-       <code>payload_length = 0</code>, so the host sees an explicit gap at a known sequence number rather
-       than silently missing data. The host re-verifies <code>payload_crc</code> independently, which also
-       catches corruption introduced in transit.</p>
+    <p>A device sends a page it cannot read, and a tombstone, as a frame with zero payload, so the host sees an
+       explicit gap at a known sequence number rather than silently missing data. The host checks
+       <code>payload_crc</code> itself, which also catches corruption in transit.</p>
 
-    <p>A page frame carries no magic, so the stream header's <code>record_format</code> says which record
-       grammar is inside, for every page of the stream. An epoch's pages share a grammar unless
-       <code>NANDLOG_RECORD_FRAMING</code> changed while it was being written, so begin a new epoch along with a
-       firmware change of that setting; <code>nandlog_retrieve_next_page()</code> reports each page's own magic,
-       for a device that would rather send it alongside each frame.</p>
+    <p>A frame carries no magic, so the header's <code>record_format</code> applies to every page of the stream. An
+       epoch's pages share one format unless <code>NANDLOG_RECORD_FRAMING</code> changed while it was being written, so
+       begin a new epoch along with a firmware update that changes it. Alternatively, a device can send each page's
+       magic, which <code>nandlog_retrieve_next_page()</code> returns in the header it fills in, alongside the
+       frame.</p>
 
     <div class="note">
-      <p><strong>Sequence numbers are contiguous within an epoch</strong>, so a host can identify exactly
-         which pages are missing and ask for them again &mdash; including pages lost to a truncated
-         transfer, which have no frame in the stream at all.</p>
+      <p><strong>Sequence numbers are contiguous within an epoch.</strong> A host can therefore identify exactly which
+         pages are missing, including pages lost to a truncated transfer, which have no frame at all, and ask for them
+         again (see <a href="api.html#retransmission">Retransmission</a>).</p>
     </div>
 
-    <h2>Reading an image or a stream</h2>
+    <h2 id="parser">Reading an image or a stream</h2>
+
+    <p><code>tools/nandlog_parse.py</code> is a second implementation of this page, written independently of the
+       library, so a disagreement between the two shows that one of them is wrong. It reads a raw dump of the part,
+       main and spare area page by page, or an offload stream.</p>
 
 <pre><code>./tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
-./tools/nandlog_parse.py stream offload.bin
 ./tools/nandlog_parse.py image  dump.bin --json
-./tools/nandlog_parse.py image  dump.bin --expect library_view.txt</code></pre>
+./tools/nandlog_parse.py image  dump.bin --expect library_view.txt
+./tools/nandlog_parse.py stream offload.bin</code></pre>
 
-    <p>The parser reports every epoch it finds, verifies every CRC, isolates corrupt pages by sequence
-       number, and lists tombstones separately. It reads the Alliance driver's table when the dump includes
-       it, wherever it is kept, passing over marked blocks as the driver does, or, with no table left, the marks
-       themselves; otherwise it keeps one copy of each sequence number, so the stale originals a relocation
-       leaves behind are not counted twice. It is an independent implementation of this page, which is the
-       point: if the device and the parser ever disagree, one of them is wrong. <code>--expect</code> compares
-       it, page by page, against the library's own view of the same image, which the simulator suite writes;
-       <code>make</code> in <code>sim/</code> runs that comparison.</p>
+    <ul>
+      <li><strong><code>image</code></strong> takes <code>--page-size</code> (default 4096), <code>--spare-size</code>
+          (default 256, or 0 for a dump of the main array only), and <code>--pages-per-block</code> (default 64). It
+          finds pages and slots by their magic, verifies every CRC, and reports each epoch's verified pages, missing
+          sequence numbers, and tombstones, and every slot with its state.</li>
+      <li><strong>Stale copies.</strong> When the dump holds the Alliance driver's table, the parser reads its newest
+          version wherever it is kept, passing over marked blocks as the driver does, and with no version left it
+          takes the marks themselves. Pages in the blocks they name are stale. In every case it keeps one copy of each
+          (epoch, sequence number), preferring one that verifies.</li>
+      <li><strong><code>stream</code></strong> checks each frame's payload CRC, lists the gaps to request again, and
+          walks framed records.</li>
+      <li><strong><code>--json</code></strong> prints either result as JSON. <strong><code>--expect</code></strong>
+          compares the parser's verdict on every page with the library's own view of the same image, one line per
+          position (<code>epoch seq payload_length record_count</code>), as the simulator suite writes it.</li>
+    </ul>
 
-    <h2>Format versions</h2>
+    <p>The parser exits with status 1 if any live page fails verification or, with <code>--expect</code>, if any page
+       disagrees. <code>make</code> in <code>sim/</code> runs the <code>--expect</code> comparison on every image the
+       suite dumps, a Winbond image among them.</p>
+
+    <h2 id="format-versions">Format versions</h2>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Macro</th><th>Versions</th></tr></thead>
+      <thead><tr><th>Macro</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>NANDLOG_FORMAT_VERSION</code></td><td>The version of what a build writes on the part: 1, the first. Every metadata slot records it.</td></tr>
-        <tr><td><code>NANDLOG_RECORD_FORMAT_THIS_BUILD</code></td><td>The record grammar a build writes: 1 opaque, 2 framed. Follows <code>NANDLOG_RECORD_FRAMING</code>; a page says which by its magic, a stream by its header.</td></tr>
-        <tr><td><code>NANDLOG_VERSION_MAJOR</code> / <code>_MINOR</code></td><td>The library API: 1.0. Independent of the formats.</td></tr>
+        <tr><td><code>NANDLOG_FORMAT_VERSION</code></td><td>The on-flash format a build writes: 1. Every metadata slot records it, and the 1.0 library does not check it when it reads.</td></tr>
+        <tr><td><code>NANDLOG_RECORD_FORMAT_THIS_BUILD</code></td><td>The record format a build writes: 1 opaque, 2 framed. It follows <code>NANDLOG_RECORD_FRAMING</code>. A page states it in its magic, a stream in its header.</td></tr>
+        <tr><td><code>NANDLOG_VERSION_MAJOR</code> / <code>_MINOR</code></td><td>The library API: 1.0. It is independent of the formats.</td></tr>
       </tbody>
     </table>
     </div>
+
+    <p>The digits in the magics (<code>TTP1</code>, <code>TTP2</code>, <code>TTM2</code>, <code>TTS1</code>,
+       <code>BBT3</code>, and the OTP marker <code>BBT2</code>) are part of the tags, not version numbers.</p>
+
+    <h2 id="newest-epoch">Finding the newest epoch</h2>
+
+    <p>A boot first finds the newest slot it may trust, because that slot names the current epoch, where it began,
+       and what the log knows about it. The boot only reads at this stage, and judges each copy from a single
+       read.</p>
+
+    <p><strong>How the ring is written.</strong> The ring's eight blocks are used in turn. The log enters a block by
+       erasing it, fills it strictly in order, and leaves it at the first pair that is not blank or will not take a
+       program, so each block's written pages are a prefix of it. The second copy of a pair is programmed only after
+       the first has read back with margin and its CRC agrees. If no pair in the ring takes both copies, a single
+       verified copy stands as the slot.</p>
+
+    <p><strong>What a boot reads.</strong></p>
+
+    <ol>
+      <li>The first readable slot of each ring block, usually its first page: 8 reads of 64 bytes. The block whose
+          first slot has the highest <code>sequence</code> is the newest.</li>
+      <li>A binary search of that block for the end of what was written: 6 header reads on a 64-page block.</li>
+      <li>Both copies of the last pair, each read once, as a whole page, into RAM. Each image is judged by every
+          checksum it carries: whole, valid with its list but not its details, valid without its list, or not a slot.
+          That image, never a second read, is what the boot goes by and what every slot it writes is built from.</li>
+      <li>A header read of the page after the pair and of the first page of the next ring block, each followed by a
+          raw read (the whole page and spare, ECC off) if its header reads erased, to check that nothing was written
+          after the slot.</li>
+    </ol>
+
+    <p>That is 18 to 20 reads, at most 2 of them raw, and ten of them in the newest ring block. If that block has no
+       usable pair, the boot repeats steps 1 to 3 for the block entered before it, at most once per ring block.</p>
+
+    <p><strong>Choosing the slot.</strong> The last pair counts only if a copy is whole, because a power cut may have
+       torn it before anything acted on it. An earlier pair counts if either copy is valid with its list, since it was
+       verified twice when it was written, and acted on. If neither copy of that pair still holds its list, going back to
+       an older slot would undo what it recorded, so the boot keeps the slot's header and seals the epoch. If only the
+       details are lost, the epoch goes on without them. As a result, one unreadable page never costs a slot.</p>
+
+    <p><strong>Settling.</strong> A slot is <strong>settled</strong> when both its copies are whole and read with
+       margin, and nothing was written after it, in its block or in the first page of the next. Otherwise a power cut
+       may have torn it, and a torn page can read valid on one boot and not the next. So before the boot erases or
+       programs anything for the write head, it writes the slot again from its image, as the first pair of the next
+       ring block, numbered past anything the torn pages could claim. Every later boot then goes by the same slot.</p>
+
+    <p><strong>Worn copies.</strong> A copy that the part corrects only at the limit of its ECC
+       (<code>NANDLOG_READ_AT_ECC_LIMIT</code>) still counts as whole, but it leaves the slot unsettled, so the boot
+       writes the slot again into a fresh block. A copy is never written to a page that reads back at the limit, so a
+       worn page costs one erase and two programs once, not at every boot. Both copies share a block, and every boot
+       reads ten of its pages. <a href="durability.html#wear">Durability</a> covers that wear.</p>
+
+    <p><strong>A newer epoch the ring lost.</strong> An epoch begins only once its slot is on the part twice, so pages
+       of an epoch newer than the ring names mean that every copy of its slot became unreadable. After finding the
+       write head of the epoch the slot names, and before acting on that slot, the boot reads the first page header of
+       the head's block (or of the next good block, if the head is part-way into one) and of the blocks after it,
+       <code>NANDLOG_ERASE_AHEAD_BLOCKS</code>&nbsp;+&nbsp;2 good blocks in all. A block whose first header neither
+       checks nor reads erased is read on, page by page. A page of a newer epoch with sequence number <var>s</var> at
+       offset <var>o</var> in its block shows that the epoch began (<var>s</var>&nbsp;&minus;&nbsp;<var>o</var>)&nbsp;/&nbsp;<var>P</var>
+       good blocks earlier, where <var>P</var> is the pages per block. The boot carries on with that epoch, finds its
+       write head, and writes it a new slot without the caller's details. If
+       <var>s</var>&nbsp;&minus;&nbsp;<var>o</var> is not a whole number of blocks, the log stops writing. The check
+       repeats after each epoch it adopts, at most once per page of the ring.</p>
+
+    <h2 id="write-head">Finding the write head</h2>
+
+    <p>The boot finds the write head by binary search over the epoch's positions, reading only. The search is correct
+       because the write paths keep three rules true at every instant a power cut can land. With <var>h</var> the write
+       head:</p>
+
+    <ol>
+      <li>Every position below <var>h</var> is passed over or not blank, and any valid header there is this epoch's,
+          carrying the position as its sequence number.</li>
+      <li>Position <var>h</var> is blank and not passed over, unless it begins a block the epoch has not entered
+          yet.</li>
+      <li>No position at or above <var>h</var> is passed over, or holds this epoch's valid header for that
+          position.</li>
+    </ol>
+
+    <p><strong>Classes.</strong> The search sorts each position it probes into one of three classes:</p>
+
+    <ul>
+      <li><strong>Inside</strong>: passed over, or holding this epoch's valid header for that position.</li>
+      <li><strong>Outside</strong>: blank, meaning every bit of the page and its spare area reads erased with ECC off,
+          or holding any other valid header.</li>
+      <li><strong>Unknown</strong>: anything else, such as an unreadable or torn page. It takes the class of the
+          nearest classifiable position below it.</li>
+    </ul>
+
+    <p>The rules make "inside" exactly "below the head". Only a blank page that is not passed over counts as evidence
+       of being past the head, so retired blocks, unreadable pages, and torn pages below the head do not mislead the
+       search. A torn page that reads whole cannot be told from a committed one, and is taken as committed. The comment
+       that opens the Write-Head Recovery section of <code>nandlog.c</code> states the rules.</p>
+
+    <p><strong>What the search reads.</strong></p>
+
+    <ul>
+      <li>&lceil;log<sub>2</sub>(<var>N</var>&nbsp;+&nbsp;1)&rceil; probes over the epoch's <var>N</var> good
+          positions, and at most three more, because the first four probes are rotated within the middle half of the
+          range from boot to boot, by the ring's sequence number and <code>NANDLOG_BOOT_SALT</code>, to spread read
+          disturb. On the Alliance part that is 18 to 21 probes.</li>
+      <li>Each probe is a header read, plus a raw read when the header reads erased. An unknown probe adds a header
+          read for each position of the run of unknown positions directly below it, never below the search's lower
+          bound.</li>
+      <li>A look past the answer, one header read a position for at most a block's worth, for a page of the epoch at
+          its own position. Finding one means a committed page came to read blank, a retention failure outside the
+          design's model, so the search runs again above it and leaves that page a gap. The look stops at the first
+          header that reads erased, unless the epoch's list was lost.</li>
+    </ul>
+
+    <p><strong>Below the head.</strong> The boot then checks the answer from below. It reads each position below the
+       head once, as a whole page, until one reads <strong>whole</strong>: this epoch's header for that position, a
+       payload whose CRC holds, and ECC that corrects. Every position on the way is passed over, whatever the search
+       made of it, because a page below the answer that reads blank or as another epoch's contradicts the search, as
+       the remains of an interrupted erase can. The boot lists those positions in the slot before it commits anything
+       after them. Usually this costs one whole-page read, of the page just below the head.</p>
+
+    <p>When that run covers everything below the head in its block, the block cannot be trusted as it stands:</p>
+
+    <ul>
+      <li>If none of those positions is passed over or carries the epoch's header, and a page at or past the head in
+          the block is not blank, the epoch never entered the block. What is there is left from an interrupted erase,
+          so the head goes back to the block's start, and the block is erased before it is programmed. Telling the two
+          cases apart costs up to a block's worth of raw reads.</li>
+      <li>Otherwise the positions may be pages the epoch tore. The boot passes them over, erases the block again, and
+          writes a tombstone at each. A boot that finds such a block again, because a power cut stopped that erase,
+          does the same again.</li>
+    </ul>
+
+    <p><strong>The head's own page.</strong> A build with <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code> also passes over
+       the head's own page whenever the head is part-way into a block in which no program has failed and which the boot
+       is not rewriting, and moves the head past it. A power cut during a commit can leave that page partly programmed,
+       and this keeps the log from programming it a second time.
+       <a href="getting-started.html#pass-over-head">Getting Started</a> covers when to choose it.</p>
+
+    <p><strong>Then.</strong> If the slot is unsettled, or the boot passed over new positions, adopted an epoch, or
+       counts a different number of retired blocks, it writes the slot. Only then does it prepare the head: it relocates
+       the head's block if a program failed there before the reboot or the head's page is not blank, rewrites a
+       distrusted block, and erases the head's block, if the epoch has not entered it, and the
+       <code>NANDLOG_ERASE_AHEAD_BLOCKS</code> blocks after it. Those blocks are erased again at every boot because an
+       interrupted erase can leave a block that reads erased but programs unreliably.</p>
 
     <footer>
       <p>nandlog is MIT-licensed. <a href="https://github.com/hedgetechllc/nandlog">Source on GitHub</a>.</p>

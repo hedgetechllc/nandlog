@@ -1,6 +1,6 @@
 # nandlog on-device tests
 
-Three test applications that answer questions the host simulator cannot. The simulator covers everything
+Test applications that answer questions the host simulator cannot. The simulator covers everything
 above the SPI wire; these cover the wire, the silicon, and the clock.
 
 | test | what it gates | writes to the part? |
@@ -12,19 +12,13 @@ above the SPI wire; these cover the wire, the silicon, and the clock.
 | `test_nandlog_powercut.c` | gates nothing: **the durability contract under real power cuts**, checked by `powercut_check.py` | the log region, continuously |
 | `test_nandlog_interrupt.c` | gates nothing: **what an interrupted program or erase leaves on the part**, to calibrate the simulator's fault models, tabulated by `interrupt_summary.py` | six blocks mid-log-region, left erased |
 
-**What has and has not run on silicon.** `nandlog_bench` has run on three Apollo4 Plus boards with the Alliance
-part, one of them with the top 34 blocks unusable, and every hardware figure in the whitepaper comes from it. Its
-last run is of a build that lacks these parts of 1.0: the refresh of a metadata copy read at the ECC limit, which reads
-and writes nothing on a boot whose metadata reads clean; the rule that a slot written while an epoch's layout is
-unverified keeps the epoch's layout record, which acts only after a boot finds the newest table version lost (no block
-was retired in that run); the boot's check that a failed head's block found retired left none of its pages behind,
-which acts only on such a retirement; and a slot judged by what any build could have written in it rather than by the
-build's own limits, which reads the same bytes at the default details limit and changes nothing for a slot that build
-wrote. `nandlog_powercut` has run on one of those boards through 116 power cuts made by hand, with
-no violation; that board ran a build that also lacks the driver's run of entry-free pages and the word-aligned
-buffers, both of which change speed alone. Its unattended builds, `nandlog_selfcut` and `nandlog_selfcut_inject`,
-have not yet run. `nandlog_interrupt` has not yet run, so the simulator's models of what an interrupted program or
-erase leaves remain uncalibrated. The Winbond driver has not run on silicon.
+**What has and has not run on silicon.** The 1.0 library has run on an Ambiq Apollo4 Plus with the Alliance part.
+`nandlog_bench` measured the hardware figures in the documentation. `nandlog_interrupt` ran 672
+program trials and 42 erase trials, and a RESET 50 µs or more into a block erase never shortened it. The unattended
+soak, `nandlog_selfcut` followed by `nandlog_selfcut_inject`, stopped 2,059 programs and erases with RESET, including
+8 injected program and erase failures, and `powercut_check.py` found no violation over 1,443 verified boots. RESET
+stands in for a brown-out, not a power cut, so `nandlog_powercut` with power removed by a relay or a switched hub has
+not yet run on 1.0. The Winbond driver has run only in the simulator.
 
 The first three work only in the **top eight blocks of the reserve**, which the log never places a page in, using
 four of them and stepping over any that is factory-bad. None of them touches the log region, the metadata ring, or
@@ -537,7 +531,6 @@ python3 tests/powercut_check.py selfcut.log
 ```
 
 **Report back:** the checker's whole output, or the capture; which build ran, on which board, and for how long.
-Neither build has run on silicon yet.
 
 
 ## `nandlog_interrupt` — what an interrupted program or erase leaves on the part

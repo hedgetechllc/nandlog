@@ -1,175 +1,219 @@
 <!-- title: Porting | desc: The thirteen functions in nandlog_port.c that connect the library to your platform, the optional hook that puts its CRC on a hardware engine, and a complete worked example for an Ambiq Apollo4 under FreeRTOS. -->
-    <h1>Porting</h1>
-    <p class="lede">Thirteen functions, and a fourteenth if the log's CRC goes to hardware. One file. This is the
-       only code you write.</p>
+<h1>Porting</h1>
+    <p class="lede">How to connect nandlog to your microcontroller, bus, and RTOS. A port is the one file of platform
+       code you write, and this page is for whoever writes it.</p>
 
-    <p>Copy <code>nandlog_port.c</code> from the repository root into your own tree, delete its
-       <code>#error</code> line, and fill in the stubs. Everything above this file is platform-independent.</p>
+    <p>Copy <code>nandlog_port.c</code> from the repository root into your own tree, delete its <code>#error</code>
+       line, and fill in its thirteen functions. Everything else in the library is platform-independent, and the chip
+       driver reaches the part only through this file's two transfer functions.</p>
 
-    <h2>The interface</h2>
+    <p>The thirteen functions bring the peripheral up and down, move bytes over the bus, serialize the library against
+       itself, drive the write-protect pin and the peripheral's power, and report: a diagnostic log, a fatal fault that
+       must not return, and a softer notice that the log has stopped taking records. A build that sets
+       <code>NANDLOG_PORT_CRC32</code> adds <code>nandlog_port_crc32()</code>, which computes the log's CRC-32 on a
+       hardware engine.</p>
+
+    <p>The worked example is the port that has run the 1.0 library on an Ambiq Apollo4 Plus under FreeRTOS, with the
+       Alliance AS5F18G04SND on a 48&nbsp;MHz SPI bus.</p>
+
+    <p>If you are writing a port, read <a href="#interface">The interface</a> and
+       <a href="#pitfalls">Things to get right</a>, and use <a href="#apollo4">the Apollo4 example</a> as a model.
+       Read <a href="#crc">The CRC hook</a> only if your MCU has a CRC engine you want to use.
+       <a href="#checking">Checking your port</a> is a bring-up checklist.</p>
+
+    <h2 id="interface">The interface</h2>
+
+    <p><code>nandlog_port.h</code> declares the functions below, and the template in <code>nandlog_port.c</code>
+       states each one's contract in a comment. <code>nandlog_probe()</code> and <code>nandlog_init()</code> take the
+       lock and then call <code>nandlog_port_init()</code> before anything touches the part.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Function</th><th>Responsibility</th></tr></thead>
+      <thead><tr><th>Function</th><th>Contract</th></tr></thead>
       <tbody>
-        <tr><td><code>nandlog_port_init</code></td><td>Configure the SPI peripheral and its pins; drive write-protect and hold to their inactive state. Return false to prevent the log coming up at all.</td></tr>
-        <tr><td><code>nandlog_port_deinit</code></td><td>Release the peripheral, leaving it in a state <code>init</code> can start from again.</td></tr>
-        <tr><td><code>nandlog_port_transfer_read</code></td><td>One command byte, <em>n</em> address bytes, then clock data back &mdash; as one exchange the part sees as uninterrupted.</td></tr>
-        <tr><td><code>nandlog_port_transfer_write</code></td><td>The same in the other direction.</td></tr>
-        <tr><td><code>nandlog_port_lock</code> / <code>_unlock</code></td><td>Serialise the library against itself.</td></tr>
-        <tr><td><code>nandlog_port_write_enable</code></td><td>Gate the part's write-protect pin: true permits programming and erasing.</td></tr>
-        <tr><td><code>nandlog_port_power</code></td><td>Wake the peripheral or return it to its lowest-power state.</td></tr>
-        <tr><td><code>nandlog_port_log</code></td><td><code>printf</code>-style sink for the library's diagnostics; <code>NANDLOG_LOG_LEVEL</code> sets which reach it.</td></tr>
-        <tr><td><code>nandlog_port_delay_us</code></td><td>Busy-wait. Called often, to pace the BUSY poll; must be cheap and must not yield.</td></tr>
-        <tr><td><code>nandlog_port_delay_ms</code></td><td>Coarse delay, used only while waiting for a part to come up. Yielding is fine.</td></tr>
-        <tr><td><code>nandlog_port_fatal</code></td><td>The part stopped answering. <strong>Must not return</strong>, and is declared so.</td></tr>
-        <tr><td><code>nandlog_port_unwritable</code></td><td>The part answers, but the log stopped taking records: no block will retain a page, or the epoch was sealed.</td></tr>
-        <tr><td><code>nandlog_port_crc32</code></td><td><em>Optional</em>, only with <code>NANDLOG_PORT_CRC32</code> set: the log's CRC-32, computed however the host likes, returning exactly what <code>zlib.crc32(data, crc)</code> would. <a href="#crc">Below</a>.</td></tr>
-        <tr><td><code>nandlog_port_crc32_hardware</code></td><td><em>Optional</em>, and never called by the library: whether <code>nandlog_port_crc32()</code> is running on hardware. The on-device benchmark reports it.</td></tr>
+        <tr><td><code>nandlog_port_init</code></td><td>Configure the SPI peripheral (mode 0, MSB first) and its pins, and drive write-protect and HOLD inactive. False stops the log coming up.</td></tr>
+        <tr><td><code>nandlog_port_deinit</code></td><td>Release the peripheral, leaving a state <code>nandlog_port_init()</code> can start from again.</td></tr>
+        <tr><td><code>nandlog_port_transfer_read</code></td><td>Send a command byte and address bytes, then clock data in, with chip-select asserted throughout.</td></tr>
+        <tr><td><code>nandlog_port_transfer_write</code></td><td>The same exchange, clocking data out.</td></tr>
+        <tr><td><code>nandlog_port_lock</code>, <code>nandlog_port_unlock</code></td><td>Serialize the library against itself. Empty in a single-threaded system.</td></tr>
+        <tr><td><code>nandlog_port_write_enable</code></td><td>Drive the write-protect pin. True permits programming and erasing.</td></tr>
+        <tr><td><code>nandlog_port_power</code></td><td>Wake the host's peripheral, or return it to its lowest-power state.</td></tr>
+        <tr><td><code>nandlog_port_log</code></td><td>A <code>printf</code>-style sink for diagnostics. Must not call back into nandlog.</td></tr>
+        <tr><td><code>nandlog_port_delay_us</code></td><td>A busy-wait that paces the BUSY poll. Must be cheap and must not yield.</td></tr>
+        <tr><td><code>nandlog_port_delay_ms</code></td><td>A coarse delay while the part comes up at probe time. May yield.</td></tr>
+        <tr><td><code>nandlog_port_fatal</code></td><td>The part has stopped answering. <strong>Must not return.</strong></td></tr>
+        <tr><td><code>nandlog_port_unwritable</code></td><td>The part answers, but the log has stopped taking records. Not urgent.</td></tr>
+        <tr><td><code>nandlog_port_crc32</code></td><td>Only with <code>NANDLOG_PORT_CRC32</code> set to 1: the log's CRC-32, exactly as <code>zlib.crc32()</code> computes it. See <a href="#crc">below</a>.</td></tr>
+        <tr><td><code>nandlog_port_crc32_hardware</code></td><td>Optional, and never called by the library: whether <code>nandlog_port_crc32()</code> runs on hardware.</td></tr>
       </tbody>
     </table>
     </div>
 
-    <h2>Four things worth getting right</h2>
+    <p>The log wakes the peripheral with <code>nandlog_port_power(true)</code> around each operation and puts it back
+       to sleep afterward, except inside a session, where it stays awake. Putting the part itself to sleep is the chip
+       driver's job (<code>nandlog_chip_low_power()</code>). <code>NANDLOG_LOG_LEVEL</code> sets which messages reach
+       <code>nandlog_port_log()</code>, and the rest are compiled out with their text. The header also gives the port
+       <code>nandlog_crc32_software()</code>, the library's own CRC-32 under the same contract as the hook.</p>
+
+    <h2 id="pitfalls">Things to get right</h2>
+
+    <p>Most of the contract is plain, but five points cause failures that the log cannot diagnose, because the bus
+       traffic looks normal.</p>
 
     <h3>The transfer shape is command, address, data</h3>
 
-    <p>Both transfer functions take <code>(command, address, address_length, buffer, length)</code>. The
-       command byte and address bytes go out first, then the data, with chip-select asserted across the
-       whole exchange.</p>
+    <p>Both transfer functions take <code>(command, address, address_length, buffer, length)</code>. The command byte
+       and the address bytes go out first, then the data, with chip-select asserted across the whole exchange.</p>
 
     <ul>
       <li><code>address</code> may be <code>NULL</code> with <code>address_length</code> zero.</li>
-      <li><code>length</code> may be zero, <strong>and that transfer must still be issued</strong> &mdash; a part can require the empty transaction to complete the command.</li>
-      <li><code>length</code> may exceed a whole page. If your peripheral has a maximum transaction size, split across as many transactions as needed, keeping chip-select asserted between them.</li>
-      <li>There is no error return. A transfer either completes or does not return, so a failure that cannot be retried has to end in <code>nandlog_port_fatal()</code>.</li>
+      <li><code>length</code> may be zero, <strong>and that transfer must still be issued</strong>, because a part can
+        need the empty transaction to complete the command.</li>
+      <li><code>length</code> may exceed a page. If the peripheral has a maximum transaction size, split the data across
+        as many transactions as it needs, keeping chip-select asserted between them.</li>
+      <li>There is no error return. A transfer either completes or does not return, so a failure that cannot be retried
+        has to end in <code>nandlog_port_fatal()</code>.</li>
     </ul>
 
-    <p>Nothing above this file names a bus. The shape is what NAND speaks whether it is wired to SPI in one,
-       two, four or eight lanes, or to a parallel ONFI bus with a port that drives the command and address
-       latches.</p>
+    <p>Nothing above this file names a bus. The same shape serves SPI in one, two, four, or eight lanes, or a parallel
+       ONFI bus whose port drives the command and address latches.</p>
 
-    <h3>The lock protects a shared cache register, not just a buffer</h3>
+    <h3>The lock protects the part's cache register</h3>
 
     <div class="warn">
-      <p>A single-threaded system can leave both lock functions empty. Anything else must supply a real
-         mutex. Reading a page is a <em>sequence</em> of commands against the one cache register inside the
-         part &mdash; latch the page, then clock it out. Two callers interleaving those sequences read each
-         other's pages, and nothing about the bus traffic looks wrong.</p>
+      <p>A single-threaded system can leave both lock functions empty. Anything else must supply a real mutex, because
+         reading a page is a <em>sequence</em> of commands against the one cache register inside the part: latch the
+         page, then clock it out. Two callers that interleave those sequences read each other's pages, and nothing
+         about the bus traffic looks wrong.</p>
     </div>
 
-    <p>Every public function takes the lock for its whole duration and does its work in an internal, so a
-       caller never holds it and these never nest. If the lock cannot be taken in every context you call
-       from &mdash; before the scheduler starts, or from an interrupt &mdash; detect that case and skip the
-       lock rather than blocking or failing. It is one lock for everything, so a call that only buffers a
-       record can wait behind a long one: a bounded <code>nandlog_begin_reading()</code> or a byte-exact
-       <code>nandlog_read_span()</code> is a pass over the whole epoch, which on a full epoch of the Alliance
-       part takes minutes. A task that logs on a deadline should not share the log with an open download, or
-       should buffer its records itself while one runs.</p>
+    <p>Every public function takes the lock for its whole duration and does its work in a <code>_locked</code>
+       internal, so a caller never holds it and the calls never nest. Release the lock under the same condition you
+       took it. If the lock cannot be taken in every context the library is called from, such as before the scheduler
+       starts or in an interrupt, detect that case and skip the lock rather than block or fail.</p>
+
+    <p>One lock covers everything, so a call that only buffers a record can wait behind a long one. A bounded
+       <code>nandlog_begin_reading()</code> reads page headers across the epoch, at about 300&nbsp;&micro;s each on the
+       Apollo4 Plus, so over a full epoch of the Alliance part (about 260,000 pages) it holds the lock for over a minute.
+       A byte-exact <code>nandlog_read_span()</code> reads whole pages and takes several minutes. A task that logs on a
+       deadline should not share the log with such a read, or should buffer its own records while one runs (see
+       <a href="api.html#long-download">Long downloads</a>).</p>
 
     <h3>Write-protect polarity is a board property</h3>
 
-    <p>Most WP# pins are active low, but a board may invert one. Get this backwards and every program
-       silently fails.</p>
+    <p>Most WP# pins are active low, but a board may invert one, so the level that permits programming depends on the
+       board, not the part. Get it backwards and every program fails silently.</p>
 
     <h3>The two failure callbacks are not the same</h3>
 
-    <p><code>nandlog_port_fatal()</code> is called when the part stops answering at all &mdash; BUSY never
-       cleared, or a transfer failed past retrying. A library has no business resetting the system it is
-       embedded in, so what happens next is yours &mdash; but it <strong>must not return</strong>. The header
-       declares it with <code>NANDLOG_NORETURN</code> (the GCC/Clang attribute, or C11's
-       <code>_Noreturn</code>), and the drivers treat everything after the call as unreachable. Reset, halt,
-       or longjmp out to a point that stops calling the log. Should a port return anyway, the status the
-       timed-out wait hands back fails every check its caller makes, so it can never be read as success.</p>
+    <p><code>nandlog_port_fatal()</code> means the part has stopped answering. The supplied drivers call it when BUSY
+       does not clear within <code>NANDLOG_BUSY_TIMEOUT_POLLS</code> polls <code>NANDLOG_BUSY_POLL_INTERVAL_US</code>
+       apart (at least 0.5&nbsp;s by default, plus the time of the reads), and a port calls it when a transfer fails past
+       retrying. What happens next is yours: record the reason somewhere that survives, then reset or halt. It
+       <strong>must not return</strong>, because the header declares it with <code>NANDLOG_NORETURN</code> (the GCC and
+       Clang attribute, or C11's <code>_Noreturn</code>), and the compiler may drop the code after the call. To keep
+       the system running without storage, reset into a configuration that does not initialize the log.</p>
 
-    <p><code>nandlog_port_unwritable()</code> is the softer failure: the part still answers, but no block
-       will retain a page, or a block could not be retired persistently &mdash; the log stops taking records until
-       a reboot or a new epoch &mdash; or a boot <strong>sealed</strong> the epoch, because its list of passed-over
-       positions is nearly full, its newest metadata slot no longer reads whole, or the bad-block table no longer
-       lays it out as it was written; then <code>nandlog_store_record()</code> returns
-       <code>NANDLOG_ERR_SEALED</code> at every boot until a new epoch is begun. <strong>Nothing here is urgent
-       and nothing here should reset the system</strong> &mdash; it is still running, it just has nowhere to put
-       data. Leave a breadcrumb the next boot can find, or tell whoever can begin a new epoch.</p>
-
-    <h2 id="crc">Optional: the log's CRC on a hardware engine</h2>
-
-    <p>Every page the log writes carries two CRC-32s, one over its header and one over its payload, and every page it
-       reads is checked against both. In software that is the library's own table-driven loop, which on a
-       Cortex-M4 at 96&nbsp;MHz costs a few hundred microseconds per 4&nbsp;KB page (see
-       <a href="performance.html#crc">Performance</a>). A host with a CRC engine can take it over: set
-       <code>NANDLOG_PORT_CRC32</code> to 1 and implement <code>nandlog_port_crc32()</code>, and every CRC the log
-       writes or checks comes from there. The contract, in full:</p>
+    <p><code>nandlog_port_unwritable()</code> is the softer failure. The part still answers, but the log has stopped
+       taking records, for one of these reasons:</p>
 
     <ul>
-      <li><strong>Return exactly what <code>zlib.crc32(data, crc)</code> returns</strong>: the reflected IEEE&nbsp;802.3
-          CRC-32 (polynomial <code>0xEDB88320</code>, initial value and final XOR <code>0xFFFFFFFF</code>) of the bytes
-          <code>crc</code> was returned for, followed by these <code>length</code> bytes. So 0 begins a value, length 0
-          returns <code>crc</code> as it is, <code>"123456789"</code> from 0 gives <code>0xCBF43926</code>, and the
-          CRC of <em>a</em> then <em>b</em> is <code>nandlog_port_crc32(nandlog_port_crc32(0, a, n), b, m)</code>.
-          The log relies on that continuation: it adds each record to its page's CRC as the record is stored, so the
-          commit computes only the header's.</li>
-      <li><strong>The library promises nothing about <code>data</code> but that it can be read</strong>: any alignment,
-          any length from 0 (when it may be <code>NULL</code>) to a page, in RAM or in constant data. An engine with
-          rules of its own &mdash; word-aligned addresses, lengths a multiple of four &mdash; does the bytes it can and
-          hands the rest to <code>nandlog_crc32_software()</code>, the library's software CRC under the same contract,
-          which continues the same value.</li>
-      <li><strong>Calls come with the library's lock held</strong>, and from <code>nandlog_init()</code> only after
-          <code>nandlog_port_init()</code> has returned true; <code>nandlog_crc32()</code> calls it from whatever
-          context calls that. An engine other drivers use too has to be shared: leave it alone while another user's
-          run is going, keep other tasks off it during a run, and put back any register you borrowed.</li>
-      <li>Short runs are common: 28-byte headers, and every record as it is stored. A run too short to repay the
-          engine's setup is cheaper in software.</li>
+      <li><strong>Until the next boot:</strong> no block would retain a page after
+        <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> tries, no block would take the write head's pages, the metadata
+        ring would not take the epoch's slot, or a block could not be retired persistently.</li>
+      <li><strong>Until a new epoch:</strong> the epoch is <strong>sealed</strong>. A sealed epoch can still be read,
+        but <code>nandlog_store_record()</code> returns <code>NANDLOG_ERR_SEALED</code>, and every boot calls this
+        function again.</li>
+    </ul>
+
+    <p><strong>Nothing here is urgent, and nothing here should reset the system.</strong> Leave a breadcrumb the next
+       boot can find, or tell whoever can begin a new epoch. <a href="durability.html#failures">Durability</a> lists
+       every failure and what the log does about it.</p>
+
+    <h3>Delays and logging run inside the library's work</h3>
+
+    <p><code>nandlog_port_delay_us()</code> runs between status polls, dozens of times in each program or erase, so make
+       it a cheap busy-wait that never yields. <code>nandlog_port_log()</code> can be reached from inside a page commit, so
+       it must not call back into nandlog.</p>
+
+    <h2 id="crc">The CRC hook</h2>
+
+    <p>Every page the log writes carries two CRC-32s, one over its header and one over its payload, and every page it
+       reads is checked against both. In software, the library's table-driven loop takes 467&nbsp;&micro;s for a
+       4,064-byte payload on the Apollo4 Plus at 96&nbsp;MHz (see <a href="performance.html#crc">Performance</a>). A host
+       with a CRC engine can take this over: set <code>NANDLOG_PORT_CRC32</code> to 1 and implement
+       <code>nandlog_port_crc32()</code>, and every CRC the log writes or checks comes from there. The contract, from
+       <code>nandlog_port.h</code>:</p>
+
+    <ul>
+      <li><strong>Return exactly what Python's <code>zlib.crc32(data, crc)</code> returns</strong>: the reflected
+        IEEE&nbsp;802.3 CRC-32 (polynomial <code>0xEDB88320</code>, initial value and final XOR <code>0xFFFFFFFF</code>)
+        of the bytes <code>crc</code> was computed over, followed by these <code>length</code> bytes. Therefore 0 begins
+        a CRC, a length of 0 returns <code>crc</code> unchanged, and <code>"123456789"</code> from 0 gives
+        <code>0xCBF43926</code>. The log relies on this continuation, because it adds each record to its page's CRC as
+        the record is stored.</li>
+      <li><strong>Accept any data the library passes</strong>: any alignment, and any length from 0 (when
+        <code>data</code> may be <code>NULL</code>) to a page. An engine with rules of its own, such as word-aligned
+        addresses or lengths in whole words, does the bytes it can and hands the rest to
+        <code>nandlog_crc32_software()</code>, which continues the same value.</li>
+      <li><strong>Expect calls with the library's lock held</strong>, from <code>nandlog_init()</code> only after
+        <code>nandlog_port_init()</code> has returned true. The public <code>nandlog_crc32()</code> calls the hook from
+        its own caller's context instead, even before <code>nandlog_init()</code>. An engine that other drivers share
+        must be shared safely: leave it alone while another user's run is going, keep other tasks off it during a run,
+        and put back any register you borrowed.</li>
+      <li><strong>Expect short runs</strong>: 28-byte headers, and every record as it is stored. A run too short to
+        repay the engine's setup is cheaper in software.</li>
     </ul>
 
     <div class="warn">
-      <p><strong>A wrong CRC is written to the part as it is.</strong> The commit's read-back compares the page with
-         what was meant to be written, CRC included, so nothing in the log can tell; the page then fails its check at
-         every read and is served as a gap. An engine whose conventions are not documented &mdash; bit order, whether
-         its result is read before or after the final XOR, what continuing a run means &mdash; has to agree with
-         <code>nandlog_crc32_software()</code> on known vectors, including a continuation split at an odd offset,
-         before its first use, and be left alone for good if it ever disagrees.</p>
+      <p><strong>A wrong CRC goes to the part as it is.</strong> The commit's read-back compares the page with what was
+         meant to be written, CRC included, so nothing in the log can tell. The page then fails its check at every read
+         and is served as a gap. Before its first use, an engine has to agree with <code>nandlog_crc32_software()</code>
+         on known vectors, including a continuation split at an odd offset, and it should be dropped for good if it ever
+         misbehaves.</p>
     </div>
 
-    <p>The template in <code>nandlog_port.c</code> carries a commented sketch; the worked example below is a complete one.</p>
+    <p>The template in <code>nandlog_port.c</code> carries a commented sketch of a hook, and the Apollo4 port below is
+       a complete one. If your MCU has no engine, <code>NANDLOG_CRC_SLICE_BY_4</code> makes the software about twice as
+       fast for 3&nbsp;KB more table (see <a href="getting-started.html#configure">Configuration</a>).</p>
 
-    <h2>Worked example: Ambiq Apollo4 under FreeRTOS</h2>
+    <h2 id="apollo4">Worked example: Ambiq Apollo4 Plus under FreeRTOS</h2>
 
-    <p>A complete port, using the Ambiq HAL's IOM peripheral. The pin names, the <code>print()</code> sink
-       and the <code>system_*</code> calls belong to the surrounding firmware, not to nandlog.</p>
+    <p>This is the port the SociTrack firmware uses, built on the Ambiq HAL's IOM peripheral. It runs SPI mode 0 at
+       48&nbsp;MHz, and it is the port the 1.0 library's hardware measurements ran on. The pin names, the
+       <code>print()</code> sink, and the <code>system_*</code> calls belong to the surrounding firmware, not to
+       nandlog. The excerpts follow the real file, except where a comment says they are abbreviated.</p>
 
-    <h3>Initialisation</h3>
+    <h3>Bring-up</h3>
 
-<pre><code>#include "nandlog_port.h"
-#include "logging.h"      /* the firmware's print() sink                        */
-#include "system.h"       /* PIN_STORAGE_*, system_reset(), diagnostics         */
-
-static void *spi_handle;
+<pre><code>static void *spi_handle;
 static SemaphoreHandle_t log_mutex;
 static StaticSemaphore_t log_mutex_buffer;
 
 bool nandlog_port_init(void)
 {
-   const am_hal_iom_config_t spi_config = {
+   const am_hal_iom_config_t spi_config =
+   {
       .eInterfaceMode = AM_HAL_IOM_SPI_MODE,
-      .ui32ClockFreq  = AM_HAL_IOM_48MHZ,
-      .eSpiMode       = AM_HAL_IOM_SPI_MODE_0
+      .ui32ClockFreq = AM_HAL_IOM_48MHZ,
+      .eSpiMode = AM_HAL_IOM_SPI_MODE_0,
+      .pNBTxnBuf = NULL,
+      .ui32NBTxnBufLength = 0
    };
 
-   /* Configure and assert the write-protect and hold pins to disable them */
-   am_hal_gpio_pinconfig(PIN_STORAGE_WRITE_PROTECT, am_hal_gpio_pincfg_output);
+   // Configure and assert the Write-Protect and Hold pins to disable them
+   configASSERT0(am_hal_gpio_pinconfig(PIN_STORAGE_WRITE_PROTECT, am_hal_gpio_pincfg_output));
    am_hal_gpio_output_set(PIN_STORAGE_WRITE_PROTECT);
-   am_hal_gpio_pinconfig(PIN_STORAGE_HOLD, am_hal_gpio_pincfg_output);
+   configASSERT0(am_hal_gpio_pinconfig(PIN_STORAGE_HOLD, am_hal_gpio_pincfg_output));
    am_hal_gpio_output_set(PIN_STORAGE_HOLD);
 
-   /* Bring up the SPI module and its four pins */
-   am_hal_iom_initialize(STORAGE_SPI_NUMBER, &amp;spi_handle);
-   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_SCK,  sck_config);
-   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_MISO, miso_config);
-   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_MOSI, mosi_config);
-   am_hal_gpio_pinconfig(PIN_STORAGE_SPI_CS,   cs_config);
-   am_hal_iom_power_ctrl(spi_handle, AM_HAL_SYSCTRL_WAKE, false);
-   am_hal_iom_configure(spi_handle, &amp;spi_config);
-   am_hal_iom_enable(spi_handle);
+   // Initialize the SPI module and enable all relevant SPI pins
+   ...   /* abbreviated: SCK, MISO, MOSI, and CS configured from the BSP's IOM0 pin settings */
+   configASSERT0(am_hal_iom_power_ctrl(spi_handle, AM_HAL_SYSCTRL_WAKE, false));
+   configASSERT0(am_hal_iom_configure(spi_handle, &amp;spi_config));
+   configASSERT0(am_hal_iom_enable(spi_handle));
+
+   ...   /* the CRC engine's check, below */
    return true;
 }
 
@@ -182,66 +226,67 @@ void nandlog_port_deinit(void)
 
     <h3>Transfers</h3>
 
-    <p>The command and address go out as one transaction with <code>bContinue</code> set, so chip-select
-       stays asserted; the data then follows, split across as many transactions as the peripheral's maximum
-       allows. The transaction count is fixed <em>before</em> the loop rather than tested against the
-       remaining length, so a zero-length read still issues the single empty transaction that smaller-page
-       parts rely on.</p>
+    <p>The command and address go out as one transaction with <code>bContinue</code> set, so chip-select stays asserted,
+       and the data follows, split across as many transactions as the peripheral's maximum requires. The port packs the
+       command and up to three address bytes into one word, which covers both supplied drivers. The transaction count is
+       fixed <em>before</em> the loop rather than tested against the remaining length, so a zero-length read still issues
+       the one empty transaction a part may rely on. Each transaction gets three attempts, 10&nbsp;&micro;s apart.</p>
 
-<pre><code>void nandlog_port_transfer_read(uint8_t command, const void *address, uint32_t address_length,
-                                void *read_buffer, uint32_t read_length)
+<pre><code>void nandlog_port_transfer_read(uint8_t command, const void *address, uint32_t address_length, void *read_buffer, uint32_t read_length)
 {
+   // Create the SPI transaction structure
    uint32_t instruction = command, retries_remaining = 4;
    uint32_t num_reads = 1 + (read_length / (1 + AM_HAL_IOM_MAX_TXNSIZE_SPI));
    memcpy(((uint8_t*)&amp;instruction) + 1, address, address_length);
    am_hal_iom_transfer_t spi_transaction = {
-      .eDirection    = AM_HAL_IOM_TX,
-      .ui32NumBytes  = 1 + address_length,
-      .pui32TxBuffer = &amp;instruction,
-      .bContinue     = true,
-      .ui8Priority   = 1
+      .eDirection                   = AM_HAL_IOM_TX,
+      .ui32NumBytes                 = 1 + address_length,
+      .pui32TxBuffer                = &amp;instruction,
+      .bContinue                    = true,
+      .ui8Priority                  = 1,
+      ...   /* abbreviated: every other field is zero or NULL */
    };
 
-   /* A transfer either completes or does not return */
-   while (--retries_remaining &amp;&amp;
-          (am_hal_iom_blocking_transfer(spi_handle, &amp;spi_transaction) != AM_HAL_STATUS_SUCCESS))
+   // Repeat the transfer until it succeeds or requires a device reset
+   while (--retries_remaining &amp;&amp; (am_hal_iom_blocking_transfer(spi_handle, &amp;spi_transaction) != AM_HAL_STATUS_SUCCESS))
       am_hal_delay_us(10);
    if (!retries_remaining)
       system_reset(true);
 
+   // Split the read across as many transactions as the peripheral's maximum requires
    uint32_t read_offset = 0;
    while (num_reads--)
    {
-      uint32_t read_bytes = (read_length &gt; AM_HAL_IOM_MAX_TXNSIZE_SPI)
-                          ? AM_HAL_IOM_MAX_TXNSIZE_SPI : read_length;
+      uint32_t read_bytes = (read_length &gt; AM_HAL_IOM_MAX_TXNSIZE_SPI) ? AM_HAL_IOM_MAX_TXNSIZE_SPI : read_length;
       read_length -= read_bytes;
 
       retries_remaining = 4;
-      spi_transaction.eDirection    = AM_HAL_IOM_RX;
-      spi_transaction.ui32NumBytes  = read_bytes;
+      spi_transaction.eDirection = AM_HAL_IOM_RX;
+      spi_transaction.ui32NumBytes = read_bytes;
       spi_transaction.pui32TxBuffer = NULL;
       spi_transaction.pui32RxBuffer = (uint32_t*)((uint8_t*)read_buffer + read_offset);
-      spi_transaction.bContinue     = read_length &gt; 0;
+      spi_transaction.bContinue = read_length &gt; 0;
       read_offset += read_bytes;
 
-      while (--retries_remaining &amp;&amp;
-             (am_hal_iom_blocking_transfer(spi_handle, &amp;spi_transaction) != AM_HAL_STATUS_SUCCESS))
+      while (--retries_remaining &amp;&amp; (am_hal_iom_blocking_transfer(spi_handle, &amp;spi_transaction) != AM_HAL_STATUS_SUCCESS))
          am_hal_delay_us(10);
       if (!retries_remaining)
          system_reset(true);
    }
 }
 
-/* nandlog_port_transfer_write() is this function with the directions reversed,
-   and splits its payload the same way for the same reason. */</code></pre>
+/* nandlog_port_transfer_write() is the same function in the other direction, split the same way */</code></pre>
+
+    <p>After three failed attempts, this port resets the MCU directly with the firmware's <code>system_reset()</code>.
+       The contract asks for <code>nandlog_port_fatal()</code> at that point, which here would also record the reason
+       before the reset.</p>
 
     <h3>Locking</h3>
 
-    <p>Before the scheduler runs there is exactly one context, so there is nothing to serialise against
-       &mdash; and taking a FreeRTOS mutex there, or from an interrupt, is an error rather than a wait. The
-       mutex is created on first use, which is guaranteed to be after the scheduler has started, and the
-       double check under a critical section makes the creation itself safe against two tasks arriving
-       together.</p>
+    <p>Before the scheduler runs there is only one context, so there is nothing to serialize against, and taking a
+       FreeRTOS mutex there or from an interrupt is an error rather than a wait. The mutex is therefore created on first
+       use, which comes after the scheduler has started. The double check under a critical section makes the creation
+       itself safe against two tasks arriving together.</p>
 
 <pre><code>static inline bool locking_applies(void)
 {
@@ -272,7 +317,8 @@ void nandlog_port_unlock(void)
 
     <h3>The rest</h3>
 
-    <p>On this board the write-protect pin is asserted <strong>high</strong> to permit programming.</p>
+    <p>On this board, driving the write-protect pin high permits programming. A sleep-and-wake cycle of the peripheral
+       through <code>nandlog_port_power()</code> takes 17&nbsp;&micro;s.</p>
 
 <pre><code>void nandlog_port_write_enable(bool enable)
 {
@@ -287,9 +333,6 @@ void nandlog_port_power(bool awake)
    am_hal_iom_power_ctrl(spi_handle, awake ? AM_HAL_SYSCTRL_WAKE : AM_HAL_SYSCTRL_DEEPSLEEP, true);
 }
 
-void nandlog_port_delay_us(uint32_t microseconds) { am_hal_delay_us(microseconds); }
-void nandlog_port_delay_ms(uint32_t milliseconds) { am_util_delay_ms(milliseconds); }
-
 void nandlog_port_log(const char *format, ...)
 {
    char message[160];
@@ -300,55 +343,43 @@ void nandlog_port_log(const char *format, ...)
    print("%s", message);
 }
 
-NANDLOG_NORETURN void nandlog_port_fatal(const char *reason)
+void nandlog_port_delay_us(uint32_t microseconds) { am_hal_delay_us(microseconds); }
+void nandlog_port_delay_ms(uint32_t milliseconds) { am_util_delay_ms(milliseconds); }
+
+void nandlog_port_fatal(const char *reason)
 {
    print("ERROR: Storage hardware fault: %s; resetting\n", reason);
    system_record_diagnostic(RESET_DIAGNOSTIC_STORAGE_FATAL);
    system_reset(true);
-   for (;;)
-      ;                    /* not reached; the reset does not return either */
+   while (true);   // nandlog requires this never to return
 }
 
 void nandlog_port_unwritable(void)
 {
-   /* Not a reason to reset: the device still works, it just has nowhere to put data.
-      Leave a breadcrumb so the next boot's log says the flash has already given up. */
+   // Not a reason to reset: the device can still range and still serve BLE.
+   // Leave a breadcrumb so that the next boot's log says the flash has already given up
    system_record_diagnostic(RESET_DIAGNOSTIC_STORAGE_UNWRITABLE);
 }</code></pre>
 
+    <p><strong>The busy timeout on this port.</strong> With the default 50,000 polls, each poll here costs about
+       47&nbsp;&micro;s: a 32&nbsp;&micro;s status read, the 10&nbsp;&micro;s delay (which takes 11&nbsp;&micro;s), and
+       about 4&nbsp;&micro;s between calls, as the 1.0 bench measured them. The part therefore has about 2.4&nbsp;s to
+       clear BUSY before the driver calls <code>nandlog_port_fatal()</code>. On the bench, a page program took 16 polls and a
+       full block's erase 74.</p>
+
     <h3>The CRC engine</h3>
 
-    <p>The Apollo4's security block computes CRC-32 in hardware (the HAL's <code>am_hal_crc32()</code>): it reads
-       <code>LEN</code> bytes, a multiple of four, from <code>SRCADDR</code>, and goes on from the seed in
-       <code>RESULT</code>. <code>RESULT</code> reads as the finished CRC, zlib's value, but a seed written to it is
-       taken bit-reversed: a run that continues the zlib value <code>z</code> is seeded with
-       <code>__RBIT(~z)</code>. The HAL only ever seeds <code>0xFFFFFFFF</code>, which bit reversal leaves alone. Ambiq
-       documents neither; both were measured on an Apollo4 Plus. A wrong CRC would make its page read as damaged, so
-       the port checks the engine at its first <code>nandlog_port_init()</code>: its CRC of <code>"12345678"</code>
-       must be zlib's, and then the engine's whole path &mdash; software to the first word boundary, the engine for the whole words,
-       software for the tail &mdash; must agree with <code>nandlog_crc32_software()</code> on <code>"123456789"</code>
-       at every alignment, on 4,064 bytes of the program image whole and continued from a split at an odd offset,
-       and on runs in RAM at every alignment. Any disagreement, then or later, and every CRC is computed in software
-       from then on, after one line in the log. The engine is the BLE controller's too, so a run holds the scheduler,
-       leaves alone an engine another task has running, and puts back the registers it borrowed. The Makefiles set
-       <code>NANDLOG_PORT_CRC32</code>.</p>
+    <p>The Apollo4's security block computes CRC-32 in hardware (the HAL's <code>am_hal_crc32()</code>). It reads
+       <code>LEN</code> bytes, a multiple of four, from <code>SRCADDR</code>, and continues from the seed in
+       <code>RESULT</code>. <code>RESULT</code> reads as the finished CRC, zlib's value, but the engine takes a seed
+       written there bit-reversed, so a run that continues the zlib value <code>z</code> is seeded with
+       <code>__RBIT(~z)</code>. (The HAL only ever seeds <code>0xFFFFFFFF</code>, which bit reversal leaves alone.)
+       Ambiq documents neither behavior, and both were measured on an Apollo4 Plus. The engine also serves the BLE
+       controller's driver, so a run suspends the scheduler, leaves alone an engine another user has running, and puts
+       back the registers it borrowed. The SociTrack Makefiles set <code>NANDLOG_PORT_CRC32</code>.</p>
 
 <pre><code>#define HW_CRC_MIN_BYTES                            64          // shorter runs cost the software less than the engine's setup
 #define HW_CRC_POLL_LIMIT                           1000000     // ENABLE polls before a run is given up as hung
-
-typedef enum { HW_CRC_UNTESTED, HW_CRC_IN_USE, HW_CRC_REFUSED } hw_crc_state_t;
-typedef enum { ENGINE_DONE, ENGINE_BUSY, ENGINE_FAILED } engine_run_t;
-
-extern void (* const g_am_pfnVectors[])(void);
-
-static hw_crc_state_t hw_crc_state = HW_CRC_UNTESTED;
-static uint32_t engine_misses;              // runs the engine was asked for and did not do
-
-static void refuse_engine(const char *why)
-{
-   hw_crc_state = HW_CRC_REFUSED;
-   nandlog_port_log("WARNING: The CRC-32 engine %s; nandlog's CRCs are computed in software from now on\n", why);
-}
 
 static engine_run_t engine_run(uint32_t *crc, const uint8_t *words, uint32_t length)
 {
@@ -414,61 +445,24 @@ static uint32_t crc_by_engine(uint32_t crc, const uint8_t *bytes, uint32_t lengt
    return nandlog_crc32_software(crc, bytes + words, length - words);
 }
 
-static const char *engine_disagreement(void)
-{
-   // The engine's CRC of "12345678" from the HAL's seed; then the engine's whole path, the software's head and tail
-   // around it, against the software alone: "123456789" at every alignment, 4,064 bytes of the program image in
-   // MRAM whole and continued from a split at an odd offset, and runs in RAM at every alignment, whole and split.
-   // Every one of them must have been the engine's. NULL if all agree, else what disagreed
-   static const uint8_t check[] = "123456789";
-   const uint8_t *image = (const uint8_t*)g_am_pfnVectors;
-   uint32_t ram[68], value = 0;
-   memcpy(ram, check, 8);
-   const engine_run_t first = engine_run(&amp;value, (const uint8_t*)ram, 8);
-   if (first == ENGINE_BUSY)
-      return "was running for another driver when it was to be checked";
-   if (first != ENGINE_DONE)
-      return "did not complete its first run";
-   if (value != 0x9AE0DAAFu)
-      return "gives the wrong CRC of \"12345678\"";
-   const uint32_t misses = engine_misses;
-   for (uint32_t align = 0; align &lt; 4; ++align)
-   {
-      memcpy((uint8_t*)ram + align, check, 9);
-      if (crc_by_engine(0, (const uint8_t*)ram + align, 9) != 0xCBF43926u)
-         return "disagrees on \"123456789\"";
-   }
-   const uint32_t whole = nandlog_crc32_software(0, image, 4064);
-   if ((crc_by_engine(0, image, 4064) != whole) || (crc_by_engine(crc_by_engine(0, image, 1001), image + 1001, 4064 - 1001) != whole))
-      return "disagrees on 4,064 bytes of MRAM";
-   memcpy(ram, image + 512, sizeof(ram));
-   for (uint32_t align = 0; align &lt; 4; ++align)
-   {
-      const uint8_t *bytes = (const uint8_t*)ram + align;
-      const uint32_t length = sizeof(ram) - 4, ram_whole = nandlog_crc32_software(0, bytes, length);
-      if ((crc_by_engine(0, bytes, length) != ram_whole) || (crc_by_engine(crc_by_engine(0, bytes, 101), bytes + 101, length - 101) != ram_whole))
-         return "disagrees on a run in RAM";
-   }
-   return (engine_misses == misses) ? NULL : "left runs to the software during its check";
-}
-
 uint32_t nandlog_port_crc32(uint32_t crc, const void *data, uint32_t length)
 {
    if ((hw_crc_state != HW_CRC_IN_USE) || (length &lt; HW_CRC_MIN_BYTES) || xPortIsInsideInterrupt())
       return nandlog_crc32_software(crc, data, length);
    return crc_by_engine(crc, (const uint8_t*)data, length);
-}
+}</code></pre>
 
-bool nandlog_port_crc32_hardware(void)
-{
-   return hw_crc_state == HW_CRC_IN_USE;
-}
+    <p>The engine does nothing for the log until <code>nandlog_port_init()</code> has checked it, once a boot and
+       before the log computes its first CRC. Until then, and from an interrupt, every CRC goes to the software. The
+       check, in <code>engine_disagreement()</code>, requires the engine's CRC of <code>"12345678"</code> from the HAL's
+       seed to be zlib's (<code>0x9AE0DAAF</code>). It then requires the whole path (software to the first word
+       boundary, the engine for the whole words, and software for the tail) to agree with
+       <code>nandlog_crc32_software()</code> on <code>"123456789"</code> at every alignment, on 4,064 bytes of the
+       program image both whole and continued from a split at byte 1,001, and on runs in RAM at every alignment, whole
+       and split. Every one of those runs must have been the engine's. <code>nandlog_port_crc32_hardware()</code>
+       returns whether the engine passed and is still in use.</p>
 
-bool nandlog_port_init(void)
-{
-   ...                                  /* the SPI bring-up above */
-
-#if NANDLOG_PORT_CRC32
+<pre><code>#if NANDLOG_PORT_CRC32
    // Once a boot, before the log computes its first CRC: the engine is used only if it agrees on every vector
    if (hw_crc_state == HW_CRC_UNTESTED)
    {
@@ -482,20 +476,34 @@ bool nandlog_port_init(void)
                           (uint32_t)HW_CRC_MIN_BYTES);
       }
    }
-#endif
-   return true;
-}</code></pre>
+#endif</code></pre>
 
-    <h2>Checking your port</h2>
+    <p>A disagreement refuses the engine, and from then on every CRC is computed in software, after one warning in the
+       log. Later, a run the engine starts and does not finish (still running after 1,000,000 polls, or reporting a CRC
+       error) also refuses it for good. A run that finds the engine busy with another user goes to the software alone.
+       On the Apollo4 Plus the hook takes 50&nbsp;&micro;s for a 4,064-byte payload, against 467&nbsp;&micro;s in
+       software. A 28-byte header goes to the software either way: 4.1&nbsp;&micro;s directly, or 5.3&nbsp;&micro;s
+       through the hook.</p>
+
+    <h2 id="checking">Checking your port</h2>
+
+    <p>Bring a new port up in this order, since each step depends on the one before.
+       <a href="getting-started.html#bring-up">Getting Started</a> walks through the same steps from the application's
+       side.</p>
 
     <ol>
-      <li><code>nandlog_probe()</code> should return true. If it does not, the part is not answering its identity command &mdash; check wiring, clock polarity and chip-select.</li>
-      <li><code>nandlog_init()</code> should return true, and a first boot will scan every block for factory bad-block markers.</li>
-      <li>Begin an epoch inside a session. Until one is begun, <code>nandlog_store_record()</code> returns <code>NANDLOG_ERR_NO_EPOCH</code>.</li>
-      <li>Store a few records, <code>nandlog_flush(true)</code>, and read them back. If writes appear to succeed but nothing reads back, check write-protect polarity.</li>
-      <li>Run the three <a href="testing.html">on-device tests</a>, which exercise the parts of the chip interface a host simulator cannot.</li>
-      <li>With <code>NANDLOG_PORT_CRC32</code>, check that your hook's verdict on its engine is the one you expect, and that
-          <code>nandlog_crc32()</code> gives <code>0xCBF43926</code> for <code>"123456789"</code>. The on-device
-          benchmark reports both (<code>BENCH_INFO crc_hook</code>, <code>crc_vectors_ok</code>) and times the hook
-          against the software.</li>
+      <li><strong><code>nandlog_probe()</code> returns true.</strong> If it does not, the part is not answering its
+        identity command, so check the wiring, the SPI mode, and chip-select.</li>
+      <li><strong><code>nandlog_init()</code> returns true.</strong> A first boot reads every block's factory bad-block
+        mark, which takes about 1.4&nbsp;s on the Alliance part.</li>
+      <li><strong>Begin an epoch inside a session.</strong> Until one is begun, <code>nandlog_store_record()</code>
+        returns <code>NANDLOG_ERR_NO_EPOCH</code>.</li>
+      <li><strong>Store a few records, call <code>nandlog_flush(true)</code>, and read them back.</strong> If writes seem
+        to succeed but nothing reads back, check the write-protect polarity.</li>
+      <li><strong>Run the on-device tests.</strong> They check the parts of the chip interface the simulator cannot,
+        such as column addressing and the internal copy (see <a href="testing.html#hardware">Testing</a>).</li>
+      <li><strong>With <code>NANDLOG_PORT_CRC32</code>, check the hook.</strong> <code>nandlog_crc32(0, "123456789",
+        9)</code> must return <code>0xCBF43926</code>, and your hook's verdict on its engine must be the one you expect.
+        The on-device benchmark prints both (<code>BENCH_INFO crc_hook</code>, <code>crc_hw_selftest</code>, and
+        <code>crc_vectors_ok</code>) and times the hook against the software.</li>
     </ol>

@@ -4,7 +4,7 @@
 // in place of this one. Every function below states what the layer above assumes of it; those assumptions
 // are the contract, and a port that does not hold them up will fail in ways the log cannot diagnose.
 //
-// A worked implementation for an Ambiq Apollo4 under FreeRTOS is in the README.
+// A worked implementation for an Ambiq Apollo4 under FreeRTOS is in the porting guide (docs/porting.html).
 
 #error "nandlog_port.c is a template: implement the stubs below for your platform, then delete this line"
 

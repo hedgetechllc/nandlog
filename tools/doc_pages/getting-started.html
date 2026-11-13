@@ -1,176 +1,255 @@
 <!-- title: Getting Started | desc: Install nandlog, configure it for your part, port it to your platform, and write and read your first records. -->
-    <h1>Getting Started</h1>
-    <p class="lede">Install, configure, port, and run.</p>
+<h1>Getting Started</h1>
+    <p class="lede">This guide takes a firmware project from nothing to logging records on a SPI NAND part and
+       reading them back. It also holds the reference for every configuration option.</p>
 
-    <h2>1. Install</h2>
+    <p>nandlog adds three C files and a few headers to your build, with no build system of its own. You need a
+       C99 compiler, a little-endian microcontroller, and one of the supported parts on a SPI bus. The work falls
+       into eight steps:</p>
+
+    <ol>
+      <li><strong>Install:</strong> add the library, one chip driver, and your port to the build.</li>
+      <li><strong>Configure:</strong> review the options in <code>nandlog_conf.h</code>.</li>
+      <li><strong>Port:</strong> implement thirteen small platform functions.</li>
+      <li><strong>Bring up:</strong> call <code>nandlog_init()</code> at boot.</li>
+      <li><strong>Begin an epoch:</strong> once on a fresh part, and again whenever you want a fresh log.</li>
+      <li><strong>Log:</strong> store records, and flush them on a timer.</li>
+      <li><strong>Read:</strong> open a read over a time window and take its pages one at a time.</li>
+      <li><strong>Check:</strong> verify a dump with the reference parser, and run the simulator.</li>
+    </ol>
+
+    <p>Most of the steps take a few lines of code. The exceptions are the port, which the
+       <a href="porting.html">Porting</a> page covers in full, and the configuration, whose defaults suit most
+       devices. If you want to see the API in use, read Sections&nbsp;4 through&nbsp;7. If you are sizing a build
+       or tuning the log for your device, read Section&nbsp;2.</p>
+
+    <h2 id="install">1. Install</h2>
+
+    <p>Add the repository to your project, for example as a submodule:</p>
 
 <pre><code>git submodule add https://github.com/hedgetechllc/nandlog.git external/nandlog</code></pre>
 
-    <p>There is no build system and nothing to install. Add three source files to your build:</p>
+    <p>Then add three source files to your build:</p>
 
     <div class="tablewrap">
     <table>
       <thead><tr><th>File</th><th>Notes</th></tr></thead>
       <tbody>
         <tr><td><code>nandlog.c</code></td><td>Always.</td></tr>
-        <tr><td><code>chips/nandlog_chip_&lt;PART&gt;.c</code></td><td>Exactly one, for the part you have fitted.</td></tr>
-        <tr><td>your <code>nandlog_port.c</code></td><td>Copy the template from the repository root and fill in the stubs.</td></tr>
+        <tr><td><code>chips/nandlog_chip_&lt;PART&gt;.c</code></td><td>Exactly one, for the part you have fitted: <code>AS5F18G04SND</code> (Alliance) or <code>W25N01GWZEIG</code> (Winbond). See <a href="chips.html">Chip Drivers</a>.</td></tr>
+        <tr><td>your <code>nandlog_port.c</code></td><td>Copy the template from the repository root into your own tree, and fill in its stubs (Section&nbsp;3).</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>Put the repository root and <code>chips/</code> on the include path.</p>
+    <p>Put the repository root and <code>chips/</code> on the include path. The Alliance driver has run on
+       hardware. Hardware testing of the Winbond driver is still to come, since it has run only in the
+       simulator.</p>
 
     <div class="warn">
-      <p><strong>Build with <code>-fno-strict-aliasing</code>.</strong> This is required, not advisory. The
-         log reads page and metadata headers out of byte buffers by pointer cast, which an optimiser is
-         otherwise entitled to reason around. It costs nothing measurable. <code>-O2</code> is otherwise
-         fine and worth having.</p>
+      <p><strong>Build with <code>-fno-strict-aliasing</code>.</strong> This flag is required. The log reads page
+         and metadata headers out of byte buffers by pointer cast, and without the flag an optimizer may reorder
+         or drop those reads.</p>
     </div>
 
-    <h2>2. Configure</h2>
+    <h2 id="configure">2. Configure</h2>
 
-    <p>Edit <code>nandlog_conf.h</code>. Nothing is derived and nothing has a silent default &mdash; anything
-       missing is a named compile error.</p>
+    <p>Every option lives in <code>nandlog_conf.h</code>, with the default shown below. The defaults suit a
+       device that logs continuously and reboots now and then, so many projects change nothing here. The options
+       that most often need a decision are <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code> (Section&nbsp;2.1),
+       <code>NANDLOG_BOOT_SALT</code>, and <code>NANDLOG_LOG_LEVEL</code>.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Setting</th><th>Default</th><th>Meaning</th></tr></thead>
+      <thead><tr><th>Option</th><th>Default</th><th>Unit and limits</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>NANDLOG_HAS_HARDWARE</code></td><td>1</td><td>Set to 0 to compile the library to no-op stand-ins that accept everything and return nothing, so the application above needs no conditionals of its own.</td></tr>
-        <tr><td><code>NANDLOG_MAX_PAGE_SIZE_BYTES</code></td><td>4096</td><td>The largest page you are prepared to spend RAM on. Every buffer is sized from this.</td></tr>
-        <tr><td><code>NANDLOG_MAX_SPARE_SIZE_BYTES</code></td><td>256</td><td>The same for the spare area.</td></tr>
-        <tr><td><code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code></td><td>3</td><td>Erase attempts on one block before it is retired. A failed program is never repeated: one program failure retires its block.</td></tr>
-        <tr><td><code>NANDLOG_ERASE_AHEAD_BLOCKS</code></td><td>2</td><td>Blocks kept erased ahead of the write head, so a page write never waits on an erase. Each block is erased once, in a call that commits no page &mdash; and again at every boot, because an erase a cut interrupted can leave a block that reads erased and programs unreliably, and nothing records a clean shutdown. A device that reboots far more often than it fills a block should set 0.</td></tr>
-        <tr><td><code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code></td><td>3</td><td>Blocks a single page write may bring into play, its own included, before the log concludes the part will not hold it.</td></tr>
-        <tr><td><code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code></td><td>512</td><td>Largest caller-defined blob stored with each epoch. At most the page size less 320 bytes &mdash; 1,728 on a 2&nbsp;KB page, 3,776 on a 4&nbsp;KB one &mdash; so a slot keeps room for at least 64 runs of passed-over positions: a larger value is a compile error, and <code>nandlog_init()</code> refuses a part whose page it leaves too little room. What it leaves is the list's room, and so how many runs an epoch may pass over before it is sealed: 880 on a 4&nbsp;KB page at 512, 64 at 3,776. Every figure for that in this guide scales with it. It may change under a log already written: an epoch whose slot then carries longer details than the new value allows, or a longer list than it leaves room for, is sealed whole &mdash; slot, pages and list kept &mdash; until a new epoch is begun.</td></tr>
-        <tr><td><code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code></td><td>250</td><td>How far a timestamp may step backwards before the log treats it as the time base having moved rather than two writers disagreeing. In the units of your timestamps, which the log never interprets.</td></tr>
-        <tr><td><code>NANDLOG_BOOT_SALT</code></td><td>0</td><td>A value that differs from one boot to the next, if the host has one &mdash; a boot counter kept in RAM that survives a reset, or a random number. The write-head search rotates its first four probes by it, so a device that boots often does not latch the same pages of the log region every time. Any value is safe: it changes which pages a boot reads, never what it finds.</td></tr>
-        <tr><td><code>NANDLOG_RECORD_FRAMING</code></td><td>1</td><td>Whether each record carries its own length, so a reader can walk a page without knowing your record types.</td></tr>
-        <tr><td><code>NANDLOG_BUSY_POLL_INTERVAL_US</code></td><td>10</td><td>The wait after each poll of the part's BUSY bit.</td></tr>
-        <tr><td><code>NANDLOG_BUSY_TIMEOUT_POLLS</code></td><td>50000</td><td>Polls before the part is declared dead. A count, not a time: the port offers no clock, so the wait lasts at least polls &times; interval &mdash; half a second at the defaults &mdash; plus the status reads' own time, which is your port's. On an Apollo4 port whose status read takes about 32&nbsp;&micro;s that is some 2.1&nbsp;s; allow for it in a watchdog.</td></tr>
-        <tr><td><code>NANDLOG_CHIP_PAGE_COPY</code></td><td>1</td><td>Whether a relocated page may be moved inside the chip instead of across the bus.</td></tr>
-        <tr><td><code>NANDLOG_PORT_CRC32</code></td><td>0</td><td>Whether the port computes the log's CRC-32, in <code>nandlog_port_crc32()</code> &mdash; on a hardware engine, say &mdash; rather than the library in software. See <a href="porting.html#crc">Porting</a>.</td></tr>
-        <tr><td><code>NANDLOG_CRC_TABLE_IN_RAM</code></td><td>1</td><td>Whether the software CRC's lookup table is kept in RAM (1&nbsp;KiB, as initialized data) rather than as a constant in flash. The table is read once per byte checksummed, so on a part whose flash reads with wait states it is most of the cost.</td></tr>
-        <tr><td><code>NANDLOG_CRC_SLICE_BY_4</code></td><td>0</td><td>Whether the software CRC takes four bytes a step through four tables rather than one byte through one: about twice the speed on a Cortex-M4, for 3&nbsp;KiB more table.</td></tr>
-        <tr><td><code>NANDLOG_LOG_LEVEL</code></td><td>3</td><td>Which of the library's messages reach <code>nandlog_port_log()</code>: 0 none, 1 those beginning <code>ERROR:</code>, 2 those and the ones beginning <code>WARNING:</code>, 3 every one, the boot's <code>INFO:</code> lines too. Those left out are compiled out, their text with them, and nothing the library does depends on a message: on the Cortex-M4 build, level 0 links about 4.8&nbsp;KB less flash than level 3.</td></tr>
-        <tr><td><code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code></td><td>0</td><td>Whether a boot that finds the write head part-way into a block passes over the head's page rather than program it. That page is the only one in the log region a residual second program can land on, so with this on there is none there. The price is paid at every such boot, clean or not, since nothing records a clean shutdown: a metadata slot pair written, a position spent, and a run of the epoch's passed-over list taken unless nothing was committed since the boot before &mdash; so an epoch is sealed after about 876 such boots on a 4&nbsp;KB page, 364 on a 2&nbsp;KB one, and must then be followed by a new one. Off suits a device that reboots far more often than it commits; on, one whose every page matters and whose boots are rare.</td></tr>
+        <tr><td><code>NANDLOG_HAS_HARDWARE</code></td><td><code>1</code></td><td>0 or 1</td><td>Whether a part is fitted. At 0, every function compiles to a stand-in that accepts everything and returns nothing, so the application needs no conditionals of its own.</td></tr>
+        <tr><td><code>NANDLOG_MAX_PAGE_SIZE_BYTES</code></td><td><code>4096</code></td><td>Bytes; at least the fitted part's page size</td><td>The largest page the build sets RAM aside for. <code>nandlog.c</code> keeps two buffers of this size, and a part with a larger page is a compile error in its driver.</td></tr>
+        <tr><td><code>NANDLOG_MAX_SPARE_SIZE_BYTES</code></td><td><code>256</code></td><td>Bytes; at least the fitted part's spare area</td><td>The same budget for the spare area.</td></tr>
+        <tr><td><code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code></td><td><code>3</code></td><td>Erase attempts; at least 1</td><td>Erase attempts on one block before the log retires it. A failed program is never repeated, so a single program failure retires its block.</td></tr>
+        <tr><td><code>NANDLOG_ERASE_AHEAD_BLOCKS</code></td><td><code>2</code></td><td>Blocks; 0 or more</td><td>Blocks kept erased ahead of the write head, so that a commit does not wait on an erase. Every boot erases them again. At 0, each block is erased only when the write head reaches it.</td></tr>
+        <tr><td><code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code></td><td><code>3</code></td><td>Blocks; at least 1</td><td>Blocks one page commit may try, its own included, before the log concludes that the part will not hold the page and stops writing. Each further block costs an erase and a block's worth of page copies.</td></tr>
+        <tr><td><code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code></td><td><code>512</code></td><td>Bytes; at most the page size less 320 (3,776 on a 4&nbsp;KB page, 1,728 on a 2&nbsp;KB page)</td><td>The largest details blob <code>nandlog_begin_epoch()</code> accepts. Every byte it allows shortens the epoch's list of passed-over positions, as explained below.</td></tr>
+        <tr><td><code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code></td><td><code>250</code></td><td>Your timestamp units; 0 or more</td><td>How far a record's timestamp may fall below the largest in its page and still join that page. A larger step back commits the page first, because the log takes it as a change of time base.</td></tr>
+        <tr><td><code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code></td><td><code>0</code></td><td>0 or 1</td><td>Whether a boot that finds the write head part-way into a block skips the head's page rather than program it. See <a href="#pass-over-head">Section&nbsp;2.1</a>.</td></tr>
+        <tr><td><code>NANDLOG_BOOT_SALT</code></td><td><code>0</code></td><td>Any 32-bit value, evaluated at each boot</td><td>A value that differs from boot to boot, such as a boot counter that survives a reset or a random number. The write-head search uses it to vary where its first four probes fall. Any value is safe.</td></tr>
+        <tr><td><code>NANDLOG_RECORD_FRAMING</code></td><td><code>1</code></td><td>0 or 1</td><td>Whether each record carries a 2-byte data length, so that a reader can walk a page without knowing your record types.</td></tr>
+        <tr><td><code>NANDLOG_BUSY_POLL_INTERVAL_US</code></td><td><code>10</code></td><td>&micro;s</td><td>The delay between polls of the part's BUSY bit.</td></tr>
+        <tr><td><code>NANDLOG_BUSY_TIMEOUT_POLLS</code></td><td><code>50000</code></td><td>Polls; at least 1</td><td>Polls before the driver declares the part dead and calls <code>nandlog_port_fatal()</code>. The wait lasts at least 0.5&nbsp;s at the defaults, and longer in practice (see below).</td></tr>
+        <tr><td><code>NANDLOG_CHIP_PAGE_COPY</code></td><td><code>1</code></td><td>0 or 1</td><td>Whether a relocated page may move inside the chip instead of across the bus. Each driver decides for its own part, so set 0 only for a part that mishandles the internal copy.</td></tr>
+        <tr><td><code>NANDLOG_PORT_CRC32</code></td><td><code>0</code></td><td>0 or 1</td><td>Whether your port computes the log's CRC-32 in <code>nandlog_port_crc32()</code>, for example on a hardware engine, instead of the library's software. See <a href="porting.html#crc">Porting</a>.</td></tr>
+        <tr><td><code>NANDLOG_CRC_TABLE_IN_RAM</code></td><td><code>1</code></td><td>0 or 1</td><td>Whether the software CRC's lookup table lives in RAM (1&nbsp;KB, or 4&nbsp;KB with slicing-by-4) rather than in flash. It is faster where flash reads have wait states.</td></tr>
+        <tr><td><code>NANDLOG_CRC_SLICE_BY_4</code></td><td><code>0</code></td><td>0 or 1</td><td>Whether the software CRC takes four bytes per step through four tables. It is about twice as fast, for 3&nbsp;KB more table.</td></tr>
+        <tr><td><code>NANDLOG_LOG_LEVEL</code></td><td><code>3</code></td><td>0 to 3</td><td>Which messages reach <code>nandlog_port_log()</code>: 0 none, 1 errors, 2 errors and warnings, 3 all of them, including the boot's <code>INFO:</code> lines. Messages above the level are compiled out, and the library behaves the same at every level.</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>Setting the two <code>MAX_</code> values larger than your part needs costs only unused RAM. A part
-       whose page exceeds the budget is a compile error inside that part's driver.</p>
+    <p><strong>Setting options.</strong> Edit <code>nandlog_conf.h</code> in place. <code>nandlog.h</code>
+       includes it from its own directory, so a copy elsewhere on the include path is not picked up. Ten options
+       can also be set from the compiler command line (for example, <code>-DNANDLOG_LOG_LEVEL=1</code>), because
+       the header defines them only when they are not already defined: <code>NANDLOG_HAS_HARDWARE</code>,
+       <code>NANDLOG_ERASE_AHEAD_BLOCKS</code>, <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code>,
+       <code>NANDLOG_BOOT_SALT</code>, <code>NANDLOG_RECORD_FRAMING</code>, <code>NANDLOG_CHIP_PAGE_COPY</code>,
+       and the four CRC and diagnostics options. Removing one of the other eight is a named compile error.</p>
 
-    <h3>Choosing <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code></h3>
+    <p><strong>RAM and CRC.</strong> Setting the two <code>MAX_</code> budgets larger than your part needs
+       costs only unused RAM. The Performance page lists <a href="performance.html#memory">what the library and
+       each driver allocate</a> and <a href="performance.html#crc">what each CRC option costs</a> on
+       hardware.</p>
 
-    <p>Off, the page at the write head is the one page of the log region a residual second program can land
-       on: a power cut during a commit that left every bit of it erased, so that nothing after the reboot can
-       tell it from an erased page. In the default build's crash-point campaign that happens in about one trial
-       in two hundred, nearly all of them cuts the bitwise model stops before any cell crosses its threshold; a
-       part rated for one program per page then holds a page programmed twice, which may read back now and
-       drift later. On, there is no such page, and the price is paid at every boot whose head is part-way into a
-       block: a slot pair, a position, and a run of the epoch's passed-over list unless nothing was committed
-       since the boot before. The list holds about 876 runs on a 4&nbsp;KB page (364 on 2&nbsp;KB), and the epoch is
-       sealed when it fills. So count, for your device, <em>B</em>: the boots an epoch sees with something
-       committed between them.</p>
+    <p><strong>Epoch details and the seal threshold.</strong> An epoch's metadata slot keeps the details blob
+       and the list of positions the epoch has passed over in one page, so the list gets whatever room the
+       details leave. Each entry is a run of consecutive positions in 4&nbsp;bytes. At the default of
+       512&nbsp;bytes, the list has room for 880 runs on a 4&nbsp;KB page and 368 on a 2&nbsp;KB page. The log
+       seals an epoch once fewer than four runs would remain free, which is after 876 runs on a 4&nbsp;KB page (364
+       on a 2&nbsp;KB page). A sealed epoch can still be read, but it refuses records with
+       <code>NANDLOG_ERR_SEALED</code> until you begin a new epoch. The limit of the page size less 320&nbsp;bytes
+       keeps room for at least 64 runs: a larger value is a compile error, and <code>nandlog_init()</code> refuses
+       a fitted part whose page leaves less room. <a href="durability.html#limits">Durability</a> explains when
+       positions are passed over.</p>
+
+    <p><strong>Changing options under a written log.</strong> If a firmware update lowers
+       <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>, the next boot seals an epoch whose slot carries longer
+       details, or a longer list, than the new value leaves room for. Its pages stay readable, and logging
+       resumes when you begin a new epoch. Begin a new epoch, too, whenever an update changes
+       <code>NANDLOG_RECORD_FRAMING</code>, because an offload stream states a single record format for all of
+       its pages (see <a href="format.html#wire-format">On-Flash Format</a>).</p>
+
+    <p><strong>Busy timeout.</strong> The port offers no clock, so the timeout is a count of polls rather than
+       a time. Each poll is one status read followed by a delay of <code>NANDLOG_BUSY_POLL_INTERVAL_US</code>, so
+       the wait lasts at least polls &times; interval (0.5&nbsp;s at the defaults) plus the time of the status
+       reads themselves. On the Apollo4 Plus port, each poll takes about 47&nbsp;&micro;s in all, so the defaults
+       wait about 2.4&nbsp;s before the driver gives up (see <a href="porting.html#apollo4">Porting</a>). Allow for that in your watchdog.</p>
+
+    <h3 id="pass-over-head">2.1 Choosing <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code></h3>
+
+    <p>This option decides what a boot does with the page at the write head when the head is part-way into a
+       block. A power cut during a commit can leave that page looking erased while it holds partial charge.
+       With the option off, the log programs that page again. With it on, the boot skips the page, so no page
+       of the log region is ever programmed twice. <a href="durability.html#limits">Durability</a> describes the
+       mechanism and the risk it removes.</p>
+
+    <p>The cost is paid at every boot that finds the head part-way into a block, clean or not, because nothing
+       records a clean shutdown. Each such boot writes a metadata slot, spends one sequence number, and takes
+       one run of the epoch's passed-over list unless nothing was committed since the boot before. The epoch is
+       therefore sealed after about 876 such boots on a 4&nbsp;KB page (364 on a 2&nbsp;KB page), and logging stops
+       until the application begins a new epoch. To choose, estimate how many boots an epoch sees with
+       something committed between them.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Device</th><th>Setting</th></tr></thead>
+      <thead><tr><th>Your device</th><th>Setting</th></tr></thead>
       <tbody>
-        <tr><td><em>B</em> stays well under the list's room &mdash; say under 400 on a 4&nbsp;KB page, 150 on 2&nbsp;KB &mdash; because it rarely reboots (mains power, a weekly restart) or begins a new epoch every mission, session or download, and power can fail during a program</td><td>On: every page that matters is never programmed twice, for a few slot writes a year</td></tr>
-        <tr><td>Reboots often while it logs &mdash; a sensor that wakes and resets every minute and commits now and then, a watchdog-heavy system &mdash; so <em>B</em> would reach the list's room within an epoch (876 one-a-minute boots is under fifteen hours)</td><td>Off: on, the epoch would be sealed and logging stop until the application begins another</td></tr>
-        <tr><td>Rarely loses power during a program: a hold-up capacitor or brown-out detection that stops logging first, or a battery the application never pulls</td><td>Off: the exposure is the cuts during a commit, and there are almost none</td></tr>
-        <tr><td>Somewhere between: reboots often, but begins epochs often enough</td><td>On, if the application begins a new epoch before <em>B</em> reaches about half the list's room, and handles <code>NANDLOG_ERR_SEALED</code> by beginning one</td></tr>
+        <tr><td>Rarely reboots (mains power, a weekly restart), or begins a new epoch for every mission, session, or download, and can lose power during a program.</td><td>On. The boots stay well short of the limit, and no page is programmed twice.</td></tr>
+        <tr><td>Reboots often while it logs, such as a sensor that resets every minute. At one boot a minute, 876 boots take under 15 hours.</td><td>Off. With it on, the epoch would soon be sealed.</td></tr>
+        <tr><td>Rarely loses power during a program, because a hold-up capacitor or brown-out detection stops logging first.</td><td>Off. The exposure is a power cut during a commit, and there are almost none.</td></tr>
+        <tr><td>Reboots often, but begins new epochs often too.</td><td>On, if the application begins a new epoch before the count reaches about half the limit, and handles <code>NANDLOG_ERR_SEALED</code> by beginning one.</td></tr>
       </tbody>
     </table>
     </div>
 
-    <h2>3. Port</h2>
+    <h2 id="port">3. Port</h2>
 
-    <p>Copy <code>nandlog_port.c</code> from the repository root into your own tree, delete its
-       <code>#error</code> line, and implement thirteen functions &mdash; fourteen if you hand the log's CRC to a
-       hardware engine. Each stub documents what the layer above assumes of it. See <a href="porting.html">Porting</a>
-       for the detail and a complete worked example.</p>
+    <p>The port connects the library to your SPI peripheral, pins, mutex, delays, and diagnostics. Copy
+       <code>nandlog_port.c</code> from the repository root into your own tree, delete its <code>#error</code>
+       line, and implement its thirteen functions, or fourteen if you hand the log's CRC to a hardware engine.
+       Each stub states what the library assumes of it. The Porting page covers
+       <a href="porting.html#interface">the interface</a>, <a href="porting.html#pitfalls">the common
+       mistakes</a>, and <a href="porting.html#apollo4">a complete example for the Apollo4</a>.</p>
 
-    <h2>4. Bring the log up</h2>
+    <h2 id="bring-up">4. Bring the log up</h2>
+
+    <p>Call <code>nandlog_init()</code> once at boot, before any other call:</p>
 
 <pre><code>#include "nandlog.h"
 
 if (!nandlog_init())
 {
-   /* No part fitted, or the port would not open. No other call should be made. */
+   /* The port would not open, or the part did not answer. Make no other nandlog call. */
    return;
 }</code></pre>
 
-    <p><code>nandlog_init()</code> opens the port, identifies the part, loads its bad-block table, recovers
-       the current epoch and locates the write head. It is safe to call more than once.
-       <code>nandlog_probe()</code> is the cheaper question for a build that only wants to know whether a
-       part is present.</p>
+    <p><code>nandlog_init()</code> opens the port, identifies the part, and loads its bad-block table. It then
+       recovers the current epoch from the metadata ring and finds the write head, the position where the next
+       page will go. On the Alliance part, a warm boot takes 82&ndash;89&nbsp;ms with 35 blocks in its bad-block table, and each further block adds about 0.43&nbsp;ms (see
+       <a href="performance.html#boot">Performance</a>). A second call returns at once. For a build that only
+       needs to know whether a part is present, <code>nandlog_probe()</code> asks the part without bringing the
+       log up.</p>
 
-    <h2>5. Start an epoch</h2>
+    <h2 id="epoch">5. Begin an epoch</h2>
 
-    <p>An <strong>epoch</strong> is one generation of the log, with its own sequence numbering from zero.
-       Reads cover one epoch at a time. Starting a new one makes everything logged previously unreachable
-       through the API, though it stays on the part until the write head sweeps over it. Anything still
-       buffered for the old epoch is committed to it first.</p>
-
-    <p><strong>A part on which no epoch has ever been begun accepts no records.</strong>
-       <code>nandlog_store_record()</code> returns <code>NANDLOG_ERR_NO_EPOCH</code> until the first
-       <code>nandlog_begin_epoch()</code>, rather than writing somewhere a reboot would not find.</p>
+    <p>An <strong>epoch</strong> is one generation of the log, numbered by the library, with its own
+       sequence numbering of pages from 0. Reads cover one epoch at a time. A part on which no epoch has ever been
+       begun accepts no records: <code>nandlog_store_record()</code> returns <code>NANDLOG_ERR_NO_EPOCH</code>
+       rather than write somewhere a reboot would not find. Begin the first epoch when the part is fresh:</p>
 
 <pre><code>nandlog_begin_session();
-nandlog_begin_epoch(&amp;experiment_details, sizeof(experiment_details));
+if (nandlog_epoch_count() == 0)                 /* a fresh part: no epoch yet */
+   nandlog_begin_epoch(&amp;details, sizeof(details));
 nandlog_end_session();</code></pre>
 
-    <p>A <strong>session</strong> holds the part powered across a run of operations instead of waking and
-       sleeping it around each one. Epoch operations and reads require one; ordinary logging does not.
-       Sessions do not nest.</p>
+    <p>The details blob is yours, up to <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>. The log stores it,
+       checksums it, and hands it back, but never looks inside, so it is a good place for a device ID, a start
+       time, or a mission name. Begin a new epoch whenever you want a fresh log (for example, at the start of
+       each mission), and whenever a record comes back <code>NANDLOG_ERR_FULL</code> or
+       <code>NANDLOG_ERR_SEALED</code>. Records still buffered are committed to the old epoch first. The old
+       epoch's pages stay on the part until the write head sweeps over them, and you can still read them by
+       selecting that epoch (<a href="api.html#epochs">API Reference</a>).</p>
 
-    <p>The details blob is opaque &mdash; the log stores it, checksums it, and hands it back, but never looks
-       inside.</p>
+    <p>A <strong>session</strong> keeps the part powered across a run of calls instead of waking and sleeping
+       it around each one. Beginning an epoch, selecting an epoch, and opening a read require one. Ordinary
+       logging does not. Sessions do not nest.</p>
 
-    <h2>6. Log records</h2>
+    <h2 id="logging">6. Log records</h2>
 
-<pre><code>const nandlog_status_t status = nandlog_store_record(RECORD_SAMPLE, milliseconds, &amp;sample, sizeof(sample));
+<pre><code>const nandlog_status_t status = nandlog_store_record(RECORD_SAMPLE, now_ms, &amp;sample, sizeof(sample));
 if (status != NANDLOG_OK)
 {
-   /* Not stored. NANDLOG_ERR_FULL or NANDLOG_ERR_SEALED: begin a new epoch. NANDLOG_ERR_TOO_LARGE: larger
-      than a page. NANDLOG_ERR_READING: a read is open and this record needed a page committed. And so on. */
+   /* Not stored. NANDLOG_ERR_FULL or NANDLOG_ERR_SEALED: begin a new epoch.
+      NANDLOG_ERR_READING: a read is open and this record needed a page committed.
+      NANDLOG_ERR_TOO_LARGE: the record can never fit in a page. */
 }</code></pre>
 
-    <p><code>record_type</code> and the data are opaque. The timestamp is only ever compared, never
-       interpreted, so its epoch and units are yours. Ignoring the status is allowed;
-       <code>nandlog_get_stats()</code> counts what was refused either way.</p>
+    <p>The record type and the data are opaque to the log. The timestamp is only ever compared, never
+       interpreted, so its epoch and units are yours. You may ignore the status, since
+       <code>nandlog_get_stats()</code> counts refused records either way. The
+       <a href="api.html#writing">API Reference</a> lists every status.</p>
 
-    <p>This call is cheap but not free every time: a page is committed as soon as the next record will not
-       fit, so it occasionally writes to flash. Records are never split across pages, and one larger than a
-       page is refused rather than corrupting the stream. <code>nandlog_data_bytes_per_page()</code> is how
-       much a page holds on the fitted part.</p>
+    <p>Records collect in a page in RAM. Most calls only copy the record, but the call that finds the page full
+       commits it to flash first. On the Alliance part, storing a 32-byte record takes about 17&nbsp;&micro;s, and
+       the call that commits a page about 3&nbsp;ms. Records are never split across pages. With framing on, each record costs 7&nbsp;bytes of overhead, so the largest record holds
+       <code>nandlog_data_bytes_per_page()</code> less 7&nbsp;bytes of data: 4,057&nbsp;bytes on a 4&nbsp;KB page.</p>
 
-    <p>A partial page only reaches flash when you ask for it:</p>
+    <p>A partial page reaches flash only when you ask for it:</p>
 
 <pre><code>nandlog_flush(true);                       /* commit whatever is buffered  */
 if (nandlog_has_buffered_data()) { ... }   /* anything unwritten in RAM?   */</code></pre>
 
     <div class="note">
-      <p><strong>Call <code>nandlog_flush(true)</code> on a timer and at shutdown.</strong> Without it, up to
-         one page of recent records sits in RAM and is lost to an unexpected reboot. A record is durable once
-         the call that committed its page has returned, and not before.</p>
-      <p><strong>Call <code>nandlog_flush(false)</code> when idle</strong>, if you have an idle moment. A call
-         that commits no page is where the log erases the next block ahead of the write head, so no single
-         call has to both program a page and erase a block.</p>
+      <p><strong>Call <code>nandlog_flush(true)</code> on a timer and at shutdown.</strong> A record is durable
+         once the call that commits its page returns, and not before. Until then, up to one page of recent
+         records sits in RAM, and a reset loses it. <a href="durability.html#contract">Durability</a> states the
+         guarantee in full.</p>
+      <p><strong>Call <code>nandlog_flush(false)</code> when idle.</strong> A call that commits no page is where
+         the log erases the next block ahead of the write head. An idle flush gives that erase a place to run, so
+         that no single call has to both program a page and erase a block.</p>
     </div>
 
-    <h2>7. Read it back</h2>
+    <p>If the part stops retaining pages, or a boot finds the epoch sealed, the library calls your
+       <code>nandlog_port_unwritable()</code> and refuses further records. Reads still work.</p>
+
+    <h2 id="reading">7. Read it back</h2>
+
+    <p>A read covers the selected epoch, by default the current one, within a time window. Open it, ask how
+       many pages it holds, and take them one at a time:</p>
 
 <pre><code>uint8_t page[NANDLOG_MAX_DATA_BYTES_PER_PAGE];
-uint32_t num_pages = 0, num_bytes = 0;
+uint32_t num_pages = 0;
 
 nandlog_begin_session();
 nandlog_begin_reading(start_ms, end_ms);     /* 0 for either bound means "no bound" */
-nandlog_read_span(&amp;num_pages, &amp;num_bytes);
+nandlog_read_span(&amp;num_pages, NULL);
 
 for (uint32_t i = 0; i &lt; num_pages; ++i)
 {
@@ -178,65 +257,72 @@ for (uint32_t i = 0; i &lt; num_pages; ++i)
    const uint32_t length = nandlog_retrieve_next_page(page, &amp;header);
    if (length == 0)
    {
-      /* Unreadable page. This is a gap, not the end of the read:
-         header.seq still identifies which page it was. */
+      /* A gap, not the end of the read: header.seq still says which page it was. */
    }
 }
 
-nandlog_end_reading();
-nandlog_end_session();                       /* also ends any open read */</code></pre>
+nandlog_end_session();                       /* also ends the read */</code></pre>
 
-    <p>Writing a page is refused while a read is open: a record that would commit one returns
-       <code>NANDLOG_ERR_READING</code>. To keep logging through a long download, open the read only to take its
-       first sequence number and page count, close it, and fetch the pages with
-       <code>nandlog_retrieve_page_by_seq()</code>, which needs no open read (API reference, <a
-       href="api.html#long-download">Logging through a long download</a>). Both time bounds are resolved inside
-       <code>nandlog_begin_reading()</code>, and both err outward &mdash; a little extra data for you to
-       filter, rather than dropping data that was asked for.</p>
+    <p>Loop over the page count, because <code>nandlog_retrieve_next_page()</code> also returns zero once the
+       read is over. Both time bounds err outward, so the read may include a little data outside the window for
+       you to filter, but never drops data inside it. Opening a read commits any buffered records first, so the
+       read serves only what is on the part.</p>
+
+    <p>Writing a page is refused while a read is open, so a record that would commit one returns
+       <code>NANDLOG_ERR_READING</code>. To keep logging through a long download, follow
+       <a href="api.html#long-download">Logging through a long download</a>.</p>
 
     <div class="note">
-      <p><strong><code>nandlog_read_span()</code> costs a read of every page in the span when you ask for an
-         exact byte total.</strong> That doubles the flash traffic of a download. Pass <code>NULL</code> for
-         <code>num_bytes</code> unless you need the figure exactly &mdash; the page count alone is
-         arithmetic and free.</p>
+      <p><strong>Pass <code>NULL</code> for the byte total unless you need it exactly.</strong> The page count
+         from <code>nandlog_read_span()</code> is arithmetic, but an exact byte total costs a read of every page
+         in the span, which doubles the flash traffic of a download.</p>
     </div>
 
-    <h3>Walking the records in a page</h3>
-
-    <p>With <code>NANDLOG_RECORD_FRAMING</code> on, a payload can be walked without knowing your record
-       types:</p>
+    <p><strong>Walking the records in a page.</strong> With <code>NANDLOG_RECORD_FRAMING</code> on, you can
+       walk a payload without knowing your record types. Inside the read loop above:</p>
 
 <pre><code>uint32_t offset = 0, record_bytes = 0;
 const uint8_t *record = NULL;
 
-while (nandlog_framed_next_record(payload, length, &amp;offset, &amp;record, &amp;record_bytes))
+while (nandlog_framed_next_record(page, length, &amp;offset, &amp;record, &amp;record_bytes))
 {
-   const uint8_t  type = record[0];
-   uint32_t timestamp;  memcpy(&amp;timestamp, record + 1, sizeof(timestamp));
+   const uint8_t type = record[0];
+   uint32_t timestamp;
+   memcpy(&amp;timestamp, record + 1, sizeof(timestamp));
    const uint8_t *data = record + 5;
    const uint32_t data_length = record_bytes - 5;
 }</code></pre>
 
-    <h2>8. Check your work</h2>
+    <h2 id="check">8. Check your work</h2>
 
-    <p>Dump an image from the device and run it through the reference parser, which verifies every CRC
-       independently of the device that wrote it:</p>
+    <p>The reference parser in <code>tools/</code> reads a raw dump of the part, or an offload stream from your
+       device, and verifies every CRC independently of the device that wrote it:</p>
 
-<pre><code>./tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
-./tools/nandlog_parse.py stream offload.bin --json</code></pre>
+<pre><code>python3 tools/nandlog_parse.py image dump.bin --page-size 4096 --spare-size 256
+python3 tools/nandlog_parse.py stream offload.bin --json</code></pre>
 
-    <p>And run the host test suite, which exercises the real log and chip driver against an emulated part, and
-       the crash-point campaign, which cuts power at every program and erase:</p>
+    <p>The image defaults suit the Alliance part. Pass <code>--page-size 2048 --spare-size 64</code> for the
+       Winbond part, and <code>--spare-size 0</code> for a dump of the main array only.
+       <a href="format.html#parser">On-Flash Format</a> describes the parser's output.</p>
 
-<pre><code>cd sim &amp;&amp; make
-cd sim &amp;&amp; make campaign
-cd sim &amp;&amp; make exhaustive</code></pre>
+    <p>The simulator in <code>sim/</code> runs the real library and chip driver against an emulated part on
+       your host. The first command runs the test suites. The second runs fixed sequences of calls, cuts power at
+       every program and erase of each, and audits the log after every cut. The third lays down every combination
+       of page states just below the write head on a small emulated part, and checks what each boot makes of
+       it:</p>
 
-    <h2>Next steps</h2>
+<pre><code>make -C sim
+make -C sim campaign
+make -C sim exhaustive</code></pre>
+
+    <p><a href="testing.html">Testing</a> explains what each target covers.</p>
+
+    <h2 id="next-steps">Next steps</h2>
 
     <ul>
-      <li><a href="api.html">API Reference</a> &mdash; every function in detail, including retransmission and reading earlier epochs.</li>
-      <li><a href="porting.html">Porting</a> &mdash; the thirteen port functions and the optional CRC hook, with a worked example.</li>
-      <li><a href="performance.html">Performance</a> &mdash; what each operation costs, measured.</li>
-      <li><a href="format.html">On-Flash Format</a> &mdash; page, metadata, and wire layouts.</li>
+      <li><a href="api.html">API Reference</a>: every function, including retransmission and reading earlier epochs.</li>
+      <li><a href="porting.html">Porting</a>: the thirteen port functions and the optional CRC hook, with a worked example.</li>
+      <li><a href="durability.html">Durability</a>: what the log guarantees across a power cut, and where the guarantee ends.</li>
+      <li><a href="performance.html">Performance</a>: what each operation costs, measured on hardware.</li>
+      <li><a href="format.html">On-Flash Format</a>: the page, metadata, and wire layouts.</li>
     </ul>

@@ -21,6 +21,7 @@
     <a href="api.html" class="current" aria-current="page">API Reference</a>
     <a href="porting.html">Porting</a>
     <a href="chips.html">Chip Drivers</a>
+    <a href="durability.html">Durability</a>
     <a href="format.html">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
@@ -33,166 +34,219 @@
     <a href="api.html" class="current" aria-current="page">API Reference</a>
     <a href="porting.html">Porting</a>
     <a href="chips.html">Chip Drivers</a>
+    <a href="durability.html">Durability</a>
     <a href="format.html">On-Flash Format</a>
     <a href="performance.html">Performance</a>
     <a href="testing.html">Testing</a>
   </nav>
   <main id="content">
 <h1>API Reference</h1>
-    <p class="lede">Everything in <code>nandlog.h</code>. Include that one header.</p>
+    <p class="lede">Every function in <code>nandlog.h</code>, the one header an application includes, grouped by
+       what it does.</p>
 
-    <p>Every public function takes an internal lock for its whole duration, so a caller never holds one and
-       calls never nest &mdash; the small accessors included. All of them are safe to call from any thread
-       provided <a href="porting.html">your port supplies a real mutex</a>. The one exception is
-       <code>nandlog_data_bytes_per_page()</code>, which reads constants and needs no lock. The lock is one lock:
-       a <code>nandlog_store_record()</code> that only copies into RAM waits behind whatever holds it, and the
-       longest holders are a bounded <code>nandlog_begin_reading()</code> and a <code>nandlog_read_span()</code>
-       with a byte total, each a pass over the epoch &mdash; on a full epoch of the Alliance part, minutes (see
-       <a href="performance.html">Performance</a>). A logger that cannot wait that long buffers its records
-       itself while a download is open.</p>
+    <p>The library keeps one log on one part. A caller needs five ideas to use it:</p>
 
-    <h2>Lifecycle</h2>
+    <ul>
+      <li><strong>Epochs.</strong> An epoch is one generation of the log, begun by
+        <code>nandlog_begin_epoch()</code> with an opaque details blob. Its pages carry sequence numbers from 0,
+        and reads cover one epoch at a time.</li>
+      <li><strong>Pages and records.</strong> <code>nandlog_store_record()</code> appends a record to a page
+        assembled in RAM. The log commits the page to flash when the next record will not fit, or when you call
+        <code>nandlog_flush(true)</code>. A record is durable once the call that commits its page returns.</li>
+      <li><strong>The write head.</strong> The write head is the position the next page goes to, which is also
+        that page's sequence number. Each boot finds it again by reading the part.</li>
+      <li><strong>Sessions.</strong> A session keeps the part powered across several calls. Beginning an epoch,
+        selecting an epoch, and opening a read require one.</li>
+      <li><strong>Reads.</strong> <code>nandlog_begin_reading()</code> picks the pages of the selected epoch
+        within a time window, and <code>nandlog_retrieve_next_page()</code> hands them out in order. A page that
+        cannot be read comes back as a gap: zero length, with its sequence number, so a host can ask for it
+        again.</li>
+    </ul>
+
+    <p>Each group below opens with a summary. Read <a href="#conventions">Calling conventions</a> first if more
+       than one thread uses the log. The <a href="#writing">Writing</a> and <a href="#reading">Reading</a> groups
+       cover what most applications call. Earlier epochs, retransmission, diagnostics, and recovery follow.</p>
+
+    <h2 id="conventions">Calling conventions</h2>
+
+    <p>Every function except three takes the port's lock for its whole duration, so with a real mutex in
+       <code>nandlog_port_lock()</code> any thread may call any function. The exceptions need no lock:
+       <code>nandlog_data_bytes_per_page()</code> reads constants, while <code>nandlog_framed_next_record()</code>
+       and <code>nandlog_crc32()</code> work only on the caller's buffer. The library never takes the lock twice,
+       so the mutex need not be recursive. However, the library calls <code>nandlog_port_log()</code> and
+       <code>nandlog_port_unwritable()</code> with its lock held, so those must not call back into it.</p>
+
+    <p>The lock is a single lock. As a result, a <code>nandlog_store_record()</code> that only copies into RAM
+       waits behind whatever holds it, and the longest holders are the calls that read across the epoch. On the
+       Alliance part, an end-bounded <code>nandlog_begin_reading()</code> over a 10,000-page epoch holds the lock
+       for 3.0&nbsp;s, and <code>nandlog_read_span()</code> with a byte total over 1,000 pages holds it for
+       1.0&nbsp;s. A logger that cannot wait that long should buffer its own records during a download (see
+       <a href="performance.html#blocking">Performance</a>).</p>
+
+    <p>A call made outside a session wakes the part for that call and puts it back to sleep afterwards. Pointer
+       arguments must be valid unless a function says it accepts <code>NULL</code>.</p>
+
+    <div class="note">
+      <p><strong>Builds without a part.</strong> With <code>NANDLOG_HAS_HARDWARE</code> set to 0, every
+         function is a stand-in. <code>nandlog_init()</code>, <code>nandlog_probe()</code>, and
+         <code>nandlog_begin_epoch()</code> return true, <code>nandlog_store_record()</code> and
+         <code>nandlog_flush()</code> return <code>NANDLOG_OK</code>, and every read, count, and walk yields
+         nothing (including <code>nandlog_framed_next_record()</code>). <code>nandlog_crc32()</code> still computes
+         the CRC.</p>
+    </div>
+
+    <h2 id="lifecycle">Lifecycle</h2>
+
+    <p>Call <code>nandlog_init()</code> once at boot. The other functions here test for a part, release the
+       port, or pause logging.</p>
 
     <div class="fn">
       <pre>bool nandlog_probe(void);</pre>
-      <p>Confirm a part is present and answering, without bringing the log up or writing anything. Intended
-         for builds that only test for its presence; <code>nandlog_init()</code> performs the same check for
+      <p>Confirm that a part is present and answering, without bringing the log up or writing anything. It is
+         meant for builds that only test for a part. <code>nandlog_init()</code> performs the same check
          itself.</p>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_init(void);</pre>
-      <p>Bring the log up: open the port, identify the part, load its bad-block table, recover the current
-         epoch from the metadata ring, and locate the write head within it. Safe to call more than once.</p>
-      <p><strong>Returns</strong> false if the port could not be opened or the part did not answer. No other
-         call should be made in that case.</p>
+      <p>Bring the log up: open the port, identify the part, and load its bad-block table, then recover the
+         current epoch from the metadata ring and find the write head. The boot may write a metadata slot and
+         erase the blocks ahead of the write head before it returns. A second call returns true at once.</p>
+      <p><strong>Returns</strong> false if the port would not open, the part did not answer, the target is
+         big-endian, or the part's page leaves too little room for <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>.
+         Make no other call in that case. A log that comes up sealed or unable to write still returns true: the
+         boot calls <code>nandlog_port_unwritable()</code>, and <code>nandlog_store_record()</code> reports
+         why.</p>
     </div>
 
     <div class="fn">
       <pre>void nandlog_deinit(void);</pre>
-      <p>Release the port. The log can be brought back up with <code>nandlog_init()</code>. Anything still
-         buffered in RAM is dropped, exactly as a power cut would drop it, so flush first.</p>
+      <p>Release the port. <code>nandlog_init()</code> can bring the log back up afterwards. Records still
+         buffered in RAM are lost, exactly as a power cut would lose them, so flush first.</p>
     </div>
 
     <div class="fn">
       <pre>void nandlog_disable(bool disable);</pre>
-      <p>Stop or resume accepting records. A disabled log refuses what it is given
-         (<code>NANDLOG_ERR_DISABLED</code>) rather than buffering it, and still serves reads; what it accepted
-         before can still be committed with <code>nandlog_flush()</code>, which while the log is disabled commits
-         and does nothing else. Nothing is disabled by <code>nandlog_init()</code>. This does not override the
-         log's own refusal after the part stopped retaining pages, which lasts until a reboot or a new epoch, nor
-         a sealed epoch's, which lasts until a new epoch.</p>
+      <p>Stop or resume accepting records. A disabled log refuses records with
+         <code>NANDLOG_ERR_DISABLED</code> rather than buffer them. It still serves reads, and
+         <code>nandlog_flush()</code> still commits what it accepted earlier, but does no erase-ahead.
+         <code>nandlog_init()</code> brings the log up enabled. Resuming does not lift the log's own refusal: a
+         log that stopped because no block would retain a page waits for a reboot or a new epoch, and a sealed
+         epoch waits for a new epoch.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_data_bytes_per_page(void);</pre>
-      <p>Payload bytes a page can carry on the fitted part: the page size less the header the log writes into
-         it. Answered from the chip driver, so it is correct before <code>nandlog_init()</code> has run.</p>
+      <p>Payload bytes a page holds on the fitted part: the page size less the 32-byte header the log writes into
+         it (4,064 on a 4&nbsp;KB page). It is answered from the chip driver, so it is correct before
+         <code>nandlog_init()</code> has run.</p>
     </div>
 
-    <h2>Sessions</h2>
+    <h2 id="sessions">Sessions</h2>
 
-    <p>A session holds the part powered across a run of operations instead of waking and sleeping it around
-       each one. Epoch operations and reads require one; ordinary logging does not. Sessions do not nest.</p>
+    <p>A session holds the part powered across a run of calls, instead of waking and sleeping it around each
+       one. <code>nandlog_begin_epoch()</code>, <code>nandlog_select_epoch()</code>, and
+       <code>nandlog_begin_reading()</code> require one. Every other function works with or without one.</p>
 
     <div class="fn">
       <pre>void nandlog_begin_session(void);
 void nandlog_end_session(void);</pre>
-      <p>Open and close a session. Ending one implies <code>nandlog_end_reading()</code> and returns the read
-         view to the current epoch.</p>
+      <p>Open and close a session. Sessions do not nest: a second <code>nandlog_begin_session()</code> does
+         nothing, and one <code>nandlog_end_session()</code> closes the session. Ending a session also closes any
+         open read and returns the read view to the current epoch.</p>
     </div>
 
-    <h2>Epochs</h2>
+    <h2 id="epochs">Epochs</h2>
 
-    <p>An epoch is one generation of the log: a numbered run with its own start page and its own sequence
-       numbering from zero. Reads cover one epoch at a time.</p>
+    <p>An epoch is one generation of the log: a numbered run of pages with its own start block, its own
+       sequence numbering from 0, and a details blob of your own. Writing always goes to the current epoch.
+       Reads go to the current epoch unless you select an earlier one.</p>
 
     <div class="fn">
       <pre>bool nandlog_begin_epoch(const void *blob, uint16_t length);</pre>
-      <p>Begin a new epoch, described by an opaque caller-defined blob of at most
-         <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>. The log neither reads nor interprets the blob. An earlier
-         epoch written by a build that allowed more keeps its longer details, and reports their length in
-         <code>nandlog_epoch_info()</code>; <code>nandlog_retrieve_epoch_details()</code> truncates them to the
-         length it is given.
-         Everything logged previously stays on the part but stops being reachable through
-         <code>nandlog_begin_reading()</code>, since reads cover the current epoch unless told otherwise.
-         Records still buffered for the old epoch are committed to it first.</p>
-      <p>The new epoch begins in the old one's last block if the old one has nothing in it, else in the next
-         good block; on a full region it begins in the full epoch's own first block. Its slot in the metadata
-         ring is the commit point: until it is on the part the old epoch is current and untouched. A new epoch
-         is also the way out of a sealed one (<code>NANDLOG_ERR_SEALED</code>) and of a log that stopped taking
-         pages.</p>
-      <p><strong>Requires a session, with no read open.</strong> Returns false if there is no session, if a
-         read is open, if the blob is too large, if the buffered records could not be committed, or if no
-         slot in the metadata ring would take it. Until the first epoch is begun on a part, records are
-         refused.</p>
+      <p>Begin a new epoch, described by an opaque blob of at most <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>.
+         The log stores the blob but never reads or interprets it. Records still buffered for the old epoch are
+         committed to it first. The new epoch is numbered above every epoch the ring has seen, starting from 1
+         on a fresh part.</p>
+      <p>The new epoch begins in the first good block at or after the old epoch's write head that holds none of
+         its pages, so the log keeps sweeping forward. On a full region, it begins in the full epoch's own first
+         block. Its metadata slot is the commit point: until the slot is on the part, the old epoch remains
+         current and untouched. A new epoch is also the way out of a sealed epoch and of a log that stopped
+         taking pages.</p>
+      <p><strong>Requires a session with no read open.</strong> Returns false if the log is not initialized,
+         there is no session, a read is open, the blob is too large, the buffered records could not be
+         committed, no good block is left to begin in, or no slot in the metadata ring would take the new
+         slot.</p>
     </div>
 
     <div class="fn">
       <pre>void nandlog_retrieve_epoch_details(void *blob, uint16_t length);</pre>
-      <p>Copy back the details of whichever epoch is selected, truncated to <code>length</code>. Zero-fills if
-         there are none, so a caller that never stored any reads zeros rather than stale bytes.</p>
+      <p>Copy the details of the selected epoch into <code>blob</code>, truncated to <code>length</code>. The
+         buffer is zero-filled first, so a caller whose epoch has no details, or whose details no longer read
+         whole, gets zeros rather than stale bytes.</p>
     </div>
 
-    <h3>Reading an earlier epoch</h3>
+    <h3 id="earlier-epochs">Reading an earlier epoch</h3>
+
+    <p>The metadata ring remembers earlier epochs, and their pages stay on the part until the write head
+       reaches them. You can list them, select one, and read it with the ordinary read functions.</p>
 
     <div class="warn">
-      <p><strong>An earlier epoch is not preserved, only left alone.</strong> The write head sweeps forward
-         from where the previous generation stopped and erases each block just before it needs it, so an
-         epoch is eaten from its start as the current one grows. A block of it can also go a little ahead of
-         that: one the window tries to erase and cannot is retired, and a retired block's pages are no longer
-         read, though nothing erased them. What comes back is whatever is left; a page that has been swept over
-         reads as a gap exactly like one that rotted.</p>
+      <p><strong>An earlier epoch is not preserved, only left alone.</strong> The write head sweeps forward from
+         where the previous epoch stopped and erases each block just before it needs it, so the current epoch
+         consumes an earlier one from its start. A block the log fails to erase is retired, and its pages are no
+         longer read. A read of an earlier epoch returns whatever is left, and a page that has been swept over
+         reads as a gap, exactly like one that rotted.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_epoch_count(void);</pre>
-      <p>How many epochs the metadata ring still describes, the current one included, capped at
-         <code>NANDLOG_MAX_LISTED_EPOCHS</code> (16). Walks the ring backwards from the current epoch's slot,
-         reading about one header per epoch listed and stopping as soon as it has enough. Nothing is cached
-         between calls.</p>
+      <p>How many epochs the metadata ring still describes, the current one included, up to
+         <code>NANDLOG_MAX_LISTED_EPOCHS</code> (16). Returns 0 on a part where no epoch has been begun. It walks
+         the ring back from the current epoch's slot, one slot read per slot pair, until it has 16 epochs or
+         reaches the oldest slot. Nothing is cached between calls.</p>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_epoch_info(uint32_t index, nandlog_epoch_info_t *info);</pre>
       <p>Describe the <code>index</code>-th epoch, newest first, so index 0 is always the current one. Returns
-         false once the index runs past what the ring describes.</p>
+         false once the index runs past what the ring describes, or past 15. It costs the same walk as
+         <code>nandlog_epoch_count()</code>, as far as that index.</p>
 <pre><code>typedef struct
 {
-   uint32_t epoch;               /* the generation number                        */
-   uint32_t created_timestamp;   /* always 0: the log reads no clock; put a time */
-                                 /*   in the details blob instead                */
-   uint32_t first_page;          /* the page it was begun at; seq 0 is there, or */
-                                 /*   in the next good block if that one has    */
-                                 /*   since been retired                        */
-   uint16_t details_length;      /* bytes of caller-defined details in its slot  */
-   bool     is_current;          /* whether this is the epoch being written now  */
-   bool     is_sealed;           /* the current epoch takes no more pages       */
-   bool     layout_unverified;   /* the bad-block table no longer lays the      */
-                                 /*   current epoch out as it was written       */
+   uint32_t epoch;               /* the epoch number                               */
+   uint32_t created_timestamp;   /* always 0, since the log reads no clock         */
+   uint32_t first_page;          /* the page it began at; sequence 0 is there, or  */
+                                 /*   in the next good block if that one retired  */
+   uint16_t details_length;      /* bytes of details in its slot                   */
+   bool     is_current;          /* whether this is the epoch being written        */
+   bool     is_sealed;           /* the current epoch takes no more pages          */
+   bool     layout_unverified;   /* the bad-block table no longer lays the current */
+                                 /*   epoch out as it was written                 */
 } nandlog_epoch_info_t;</code></pre>
-      <p><code>is_sealed</code> says the current epoch takes no more pages until a new one is begun
-         (<code>NANDLOG_ERR_SEALED</code>). <code>layout_unverified</code> says why, in the one case that matters to
-         a read: the bad-block table no longer lays the epoch's positions out as they were written &mdash; both
-         copies of its newest version lost, say &mdash; so a read of it goes ahead as best it can, and may miss
-         pages or serve a page a relocation copied twice under its one sequence number. Such a read also logs an
-         error as it opens. The seal's slot keeps the layout the epoch was written by, so the flag stands at every
-         boot until a new epoch is begun, and the epoch begun after it, at whichever boot, starts past every block
-         still holding one of its pages. Both are false for an earlier epoch.</p>
+      <p>Put a creation time in the details blob if you need one. <code>is_sealed</code> means that the current
+         epoch refuses records with <code>NANDLOG_ERR_SEALED</code> until a new one is begun.
+         <code>layout_unverified</code> gives one cause of a seal: the bad-block table no longer lays the epoch's
+         positions out as they were written. A read of such an epoch goes ahead, but may miss pages or serve a
+         relocated page twice under one sequence number. The next epoch begun starts past every block that still
+         holds a page of it. Both flags are false for an earlier epoch.</p>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_select_epoch(uint32_t epoch);
 void nandlog_select_current_epoch(void);</pre>
-      <p>Point reads at an epoch other than the one being written, and back again. <strong>Writing is refused
-         while an earlier epoch is selected</strong>, so a download cannot be mistaken for somewhere to put
-         data.</p>
-      <p><code>nandlog_select_epoch()</code> requires a session, fails while a read is open, and returns false
-         if no slot in the ring names that epoch. Ending the session also returns to the current epoch.</p>
-      <p>A read of an earlier epoch ends at the last page it wrote, found by reading the headers of the block
-         before the one its successor began in, from its end back. Every page from another epoch is a gap, never data. A read that yields
-         nothing means the epoch has been overwritten, not that it never existed &mdash; compare against
-         <code>nandlog_epoch_info()</code>, which still describes it from the ring.</p>
+      <p>Point reads at another epoch, and back again. <strong>Writing is refused while an earlier epoch is
+         selected</strong>, with <code>NANDLOG_ERR_EARLIER_EPOCH</code>, so a download cannot be mistaken for a
+         place to put data. Retransmission and <code>nandlog_retrieve_epoch_details()</code> follow the selection
+         too.</p>
+      <p><code>nandlog_select_epoch()</code> requires a session and fails while a read is open. It returns false
+         if the epoch is not among the 16 newest the ring describes, or if its slot cannot be read. Selecting the
+         current epoch's number succeeds and selects the current epoch. <code>nandlog_select_current_epoch()</code>
+         closes a read open over an earlier epoch, and ending the session also returns to the current epoch.</p>
+      <p>A read of an earlier epoch ends at the last page it wrote, which the log finds by reading page headers
+         back from the end of the last block or two before its successor began. A page of another epoch is always
+         a gap, never data. A read that yields nothing means the epoch has been overwritten, not that it never
+         existed: <code>nandlog_epoch_info()</code> still describes it from the ring.</p>
     </div>
 
 <pre><code>nandlog_begin_session();
@@ -209,32 +263,33 @@ if (nandlog_select_epoch(previous))
    nandlog_retrieve_epoch_details(&amp;details, sizeof(details));
    nandlog_begin_reading(0, 0);
    /* ... the usual read loop ... */
-   nandlog_end_reading();
 }
 
-nandlog_end_session();</code></pre>
+nandlog_end_session();                       /* back to the current epoch */</code></pre>
 
-    <h2>Writing</h2>
+    <h2 id="writing">Writing</h2>
+
+    <p>Records go into a page in RAM, and the log commits the page when the next record will not fit or when you
+       flush. Committing a page programs it, reads it back, and moves it to another block if the part does not
+       retain it.</p>
 
     <div class="fn">
       <pre>nandlog_status_t nandlog_store_record(uint8_t record_type, uint32_t timestamp,
                                       const void *data, uint32_t data_length);</pre>
-      <p>Append one record to the page being assembled in RAM. <code>record_type</code> and
-         <code>data</code> are opaque to the log; the timestamp is only ever compared, never interpreted, so
-         its epoch and units are yours.</p>
-      <p>A timestamp may be earlier than records already in the page by up to
-         <code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code> &mdash; in the units of your timestamps, which are
-         milliseconds only if you made them so &mdash; as when one record is stamped when something starts and
-         stored after another writer's record that was stamped later. It is kept exactly as given, and the
-         page's bounds widen to cover it, so a page is not necessarily in time order. A larger backward step
-         means the time base moved, and commits the page first. <code>0xFFFFFFFF</code>, the header's "no
-         timestamp" value, is a time like any other: the record keeps it, and its page's bounds count it as
-         <code>0xFFFFFFFE</code>.</p>
-      <p>Each call adds its record to the page's CRC, so the call that commits the page computes only its
-         header's. Committing a full page happens here, so this call occasionally writes to flash. A call that commits a
-         page never also erases a block, unless the block the write head is entering was never erased ahead
-         of it. Records are never split across pages. With <code>NANDLOG_RECORD_FRAMING</code> on, the record
-         is prefixed with its own data length, costing two bytes.</p>
+      <p>Append one record to the page being assembled in RAM. <code>record_type</code> and <code>data</code>
+         are opaque to the log. The timestamp is only ever compared, never interpreted, so its epoch and units
+         are yours. With <code>NANDLOG_RECORD_FRAMING</code> on, the record is prefixed with its 2-byte data
+         length. Records are never split across pages.</p>
+      <p>A record may carry a timestamp earlier than the largest in its page by up to
+         <code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code>, in your timestamp units. That happens, for example, when a
+         record stamped at the start of an event is stored after another writer's later record. The record keeps
+         its timestamp and joins the page, whose time bounds widen to cover it, so a page need not be in time
+         order. A larger step back means the time base moved, and commits the page first. A record stamped
+         <code>NANDLOG_NO_TIMESTAMP</code> (<code>0xFFFFFFFF</code>) keeps that stamp, but its page's bounds
+         count it as <code>0xFFFFFFFE</code>.</p>
+      <p>The call that finds the page full commits it, so this call occasionally writes to flash. A call that
+         commits nothing may instead erase the next block ahead of the write head. Records stored while a read is
+         open are not served by that read.</p>
       <p><strong>Returns <code>NANDLOG_OK</code> if the record was stored, and otherwise why it was
          not:</strong></p>
       <div class="tablewrap">
@@ -242,149 +297,172 @@ nandlog_end_session();</code></pre>
         <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
         <tbody>
           <tr><td><code>NANDLOG_ERR_NOT_INITIALIZED</code></td><td><code>nandlog_init()</code> has not succeeded.</td></tr>
-          <tr><td><code>NANDLOG_ERR_NO_EPOCH</code></td><td>No epoch has ever been begun on this part.</td></tr>
-          <tr><td><code>NANDLOG_ERR_DISABLED</code></td><td><code>nandlog_disable(true)</code>, or the log stopped itself after the part stopped retaining pages.</td></tr>
+          <tr><td><code>NANDLOG_ERR_NO_EPOCH</code></td><td>No epoch has ever been begun on this part. Call <code>nandlog_begin_epoch()</code>.</td></tr>
+          <tr><td><code>NANDLOG_ERR_DISABLED</code></td><td><code>nandlog_disable(true)</code> is in force, or the log stopped writing because the part no longer retains pages.</td></tr>
           <tr><td><code>NANDLOG_ERR_EARLIER_EPOCH</code></td><td>An earlier epoch is selected for reading.</td></tr>
           <tr><td><code>NANDLOG_ERR_READING</code></td><td>A read is open, and storing this record meant committing a page.</td></tr>
-          <tr><td><code>NANDLOG_ERR_TOO_LARGE</code></td><td>The record can never fit in a page, whatever its length, up to 2<sup>32</sup>&nbsp;&minus;&nbsp;1.</td></tr>
+          <tr><td><code>NANDLOG_ERR_TOO_LARGE</code></td><td>The record can never fit in a page: its data exceeds <code>nandlog_data_bytes_per_page()</code> less 7&nbsp;bytes (less 5 without framing).</td></tr>
           <tr><td><code>NANDLOG_ERR_FULL</code></td><td>Every page of the log region belongs to the current epoch. Begin a new one.</td></tr>
-          <tr><td><code>NANDLOG_ERR_UNWRITABLE</code></td><td>A commit this call needed failed: no block would retain the page. The records already buffered for it are lost too, and counted as such.</td></tr>
-          <tr><td colspan="2">Either of those two also comes back when the erase-ahead this call carried left what is buffered no block to be committed to: the records already buffered are counted lost, and this one is refused rather than reported stored.</td></tr>
-          <tr><td><code>NANDLOG_ERR_SEALED</code></td><td>The epoch is sealed and takes no more pages until a new one is begun: its list of passed-over positions is nearly full, its newest metadata slot no longer reads with that list whole, or the bad-block table no longer lays its pages out as they were written. The seal is in the epoch's slot, so every later boot refuses too, and calls <code>nandlog_port_unwritable()</code>. Reads go on.</td></tr>
+          <tr><td><code>NANDLOG_ERR_UNWRITABLE</code></td><td>A commit this call needed failed, because no block would retain the page. The records already buffered for it are lost too. Later records get <code>NANDLOG_ERR_DISABLED</code> until a reboot or a new epoch.</td></tr>
+          <tr><td><code>NANDLOG_ERR_SEALED</code></td><td>The epoch is sealed and takes no more pages until a new one is begun. Reads go on.</td></tr>
         </tbody>
       </table>
       </div>
+      <p>A record that is not stored is counted in <code>records_refused</code>, and buffered records that a
+         failed commit loses are counted in <code>records_lost</code>. <code>NANDLOG_ERR_FULL</code> and
+         <code>NANDLOG_ERR_UNWRITABLE</code> can also come from the erase-ahead of a call that commits nothing: if
+         that erase fails and leaves the buffered records nowhere to go, they are counted lost and this record is
+         refused.</p>
+      <p>A boot seals an epoch when its list of passed-over positions is nearly full, or when its metadata or
+         layout can no longer be verified. The seal is recorded in the epoch's slot, so every later boot refuses
+         records too and calls <code>nandlog_port_unwritable()</code>. <a href="durability.html#limits">Durability</a>
+         lists the causes.</p>
     </div>
 
     <div class="fn">
       <pre>nandlog_status_t nandlog_flush(bool write_partial_pages);</pre>
-      <p>Commit what is buffered. A page is written automatically as soon as the next record will not fit, so
-         this is only needed to force out a partial page &mdash; a timed flush, or shutdown. Pass false to
-         write only if a whole page has accumulated.</p>
-      <p>A call that commits nothing is where the log erases the next block ahead of the write head, if one
-         is due, so an idle <code>nandlog_flush(false)</code> is a good place for that work to land &mdash;
-         unless the log is disabled, when a flush only commits. Returns the outcome of the commit,
-         <code>NANDLOG_OK</code> if there was nothing to commit, or why it was refused. An erase-ahead that leaves
-         what is buffered nowhere to go &mdash; a block that would not erase, and the region full or no block left
-         to take a page &mdash; counts those records lost and returns <code>NANDLOG_ERR_FULL</code> or
-         <code>NANDLOG_ERR_UNWRITABLE</code>.</p>
+      <p>Commit what is buffered. A page is committed automatically as soon as the next record will not fit,
+         so this is needed only to force out a partial page, on a timer or at shutdown. Pass false to commit only
+         if a whole page has accumulated.</p>
+      <p>A call that commits nothing erases the next block ahead of the write head, if one is due, so an idle
+         <code>nandlog_flush(false)</code> is a good place for that work. A disabled log skips the erase.</p>
+      <p><strong>Returns</strong> the outcome of the commit, or <code>NANDLOG_OK</code> if there was nothing to
+         commit. It refuses with <code>NANDLOG_ERR_NOT_INITIALIZED</code>, <code>NANDLOG_ERR_SEALED</code>,
+         <code>NANDLOG_ERR_DISABLED</code> (only when the log stopped writing on its own),
+         <code>NANDLOG_ERR_EARLIER_EPOCH</code>, or <code>NANDLOG_ERR_READING</code>, the last whenever a read is
+         open. An erase-ahead that leaves the buffered records nowhere to go counts them lost and returns
+         <code>NANDLOG_ERR_FULL</code> or <code>NANDLOG_ERR_UNWRITABLE</code>.</p>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_has_buffered_data(void);</pre>
-      <p>Whether any records are sitting unwritten in RAM.</p>
+      <p>Whether any records are sitting in RAM, not yet committed.</p>
     </div>
 
-    <h2>Reading</h2>
+    <h2 id="reading">Reading</h2>
+
+    <p>A read is opened over the selected epoch with <code>nandlog_begin_reading()</code>, which fixes its span
+       of pages, and then drained page by page. Two further functions fetch single pages without an open read:
+       by sequence number, or counting back from the newest page.</p>
+
+    <p>The read functions describe each page in a <code>nandlog_page_header_t</code>. The fields a caller uses
+       are <code>seq</code>, <code>first_timestamp</code> and <code>last_timestamp</code> (the smallest and
+       largest record timestamps in the page), <code>record_count</code>, <code>payload_length</code>, and
+       <code>magic</code>, which is <code>NANDLOG_PAGE_MAGIC_FRAMED</code> for framed records and
+       <code>NANDLOG_PAGE_MAGIC</code> for opaque ones. <a href="format.html#page-header">On-Flash Format</a> gives
+       the byte layout. A payload buffer needs room for <code>NANDLOG_MAX_DATA_BYTES_PER_PAGE</code> bytes, and
+       nothing past the payload is written to it.</p>
 
     <div class="fn">
       <pre>void nandlog_begin_reading(uint32_t starting_timestamp, uint32_t ending_timestamp);</pre>
       <p>Open a read over the selected epoch, bounded by timestamp. Zero for either bound means "from the
-         beginning" and "to the end"; both bounds are resolved here, so nothing downstream has to seek
-         again. Pages are selected by the time bounds their headers advertise &mdash; the smallest and the
-         largest timestamp of the page's records, which need not be its first and last: from the first page whose
-         largest reaches the start, to the last page whose smallest is within the end. Both err outward
-         &mdash; a little extra data to filter beats dropping data that was asked for &mdash; so every page
-         holding a record stamped within the window is selected, and so can be a page whose records straddle
-         the window without falling in it, or the pages between two that bracket it across a backward step of
-         the time base. A window that ends before the first page found for its start &mdash; before the first
-         record, or in a gap between two pages' bounds &mdash; selects nothing.</p>
-      <p><strong>Records still buffered for the current epoch are committed first</strong>, exactly as
+         beginning" or "to the end". Both bounds are resolved here, so nothing downstream has to seek again.</p>
+      <p>Pages are selected by the time bounds their headers carry: from the first page whose largest timestamp
+         reaches the start, to the last page whose smallest timestamp is within the end. Both bounds err outward,
+         so every page holding a record within the window is selected. The read may also include pages whose
+         records straddle the window, or pages between two that bracket it across a backward step of the time
+         base. A window that ends before the first page found for its start selects nothing.</p>
+      <p><strong>Records still buffered for the current epoch are committed first</strong>, as
          <code>nandlog_flush(true)</code> would, so a read serves only what is on the part. That is what makes a
-         sequence number an identity: whatever a read serves under (epoch, sequence number) is what that
-         sequence number holds from then on &mdash; or a gap, if the part later loses the page &mdash; and is
-         never given to other records, across any number of reboots and power cuts. Records stored while the
-         read is open are buffered for the next one.</p>
-      <p>A bound is resolved by reading every page header in the epoch, under the library's lock.</p>
-      <p><strong>Requires a session.</strong> While a read is open, committing a page is refused: a commit that
-         fails relocates the head's block and retires it, and an open read keeps its place by physical page. To
-         keep logging through a long download, see <a href="#long-download">below</a>.</p>
+         sequence number an identity: what a read serves under an epoch and sequence number is what that
+         sequence number holds from then on, or a gap if the part later loses the page. It is never given to
+         other records, across any number of reboots and power cuts.</p>
+      <p>A start bound reads page headers until the first page that reaches it, and an end bound reads every
+         page header in the epoch, both with the lock held. An unbounded read needs no header reads.</p>
+      <p><strong>Requires a session</strong>, and does nothing outside one. While a read is open, committing a
+         page is refused, because an open read keeps its place by physical page and a failed commit could move
+         the head's block. To keep logging through a long download, see <a href="#long-download">below</a>.</p>
     </div>
 
     <div class="fn">
       <pre>void nandlog_end_reading(void);</pre>
-      <p>Close a read, whether or not it ran to completion. Implied by <code>nandlog_end_session()</code>.</p>
+      <p>Close a read, whether or not it ran to completion. <code>nandlog_end_session()</code> implies it, and a
+         read also closes itself after its last page.</p>
     </div>
 
     <div class="fn">
       <pre>void nandlog_read_span(uint32_t *num_pages, uint32_t *num_bytes);</pre>
-      <p>Measure the open read: how many pages it will yield, including any that turn out to be unreadable,
-         and how many payload bytes they hold. Either pointer may be <code>NULL</code>. Reports zero for
-         both if no read is open. Pages are counted over the blocks the part holds good, so a retired block
-         in the epoch adds nothing.</p>
-      <p>The byte total is exact in both directions &mdash; it is computed by exactly the checks that serve
-         the pages, so a page with a sound header and a rotted payload, or a page of another epoch, is neither
-         counted nor delivered. A host sizing a receive buffer depends on that. It is exact on a part that
-         reads each page the same way twice; a page a power cut left with cells that read differently from
-         one read to the next can pass its checks in one pass and not in the other.</p>
-      <p><strong>The byte total costs a read of every page in the span</strong>, doubling the flash traffic
-         of a download. Pass <code>NULL</code> unless the figure is needed exactly; the page count is
-         arithmetic.</p>
+      <p>Measure what the open read has still to yield: how many pages, including any that turn out to be
+         unreadable, and how many payload bytes they hold. Either pointer may be <code>NULL</code>. Both are zero
+         if no read is open. Pages are counted over the blocks the part holds good, so a retired block in the
+         epoch adds nothing.</p>
+      <p><strong>The byte total costs a read of every page in the span</strong>, which doubles the flash
+         traffic of a download. Pass <code>NULL</code> for <code>num_bytes</code> unless you need the figure
+         exactly; the page count is arithmetic.</p>
+      <p>The byte total runs the same checks that serve the pages, so a host can size a receive buffer from it.
+         The one exception is a page that a power cut left with cells that read differently from one read to the
+         next, which can pass its checks on one pass and fail them on the other.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_retrieve_next_page(uint8_t *buffer, nandlog_page_header_t *header);</pre>
-      <p>Take the next page of the open read, returning its payload length. <code>buffer</code> needs room
-         for <code>NANDLOG_MAX_DATA_BYTES_PER_PAGE</code> bytes, and nothing past the payload is written to it.
-         Pass <code>NULL</code> for <code>header</code> to ignore the framing metadata; its <code>magic</code>
-         is the page's own record format, which differs from this build's only if
-         <code>NANDLOG_RECORD_FRAMING</code> changed during the epoch. The read closes itself after its last
-         page.</p>
-      <p><strong>Zero means that page was unreadable, which is not the end of the read.</strong> A page whose
-         header could not be read comes back with <code>seq</code> set to the sequence number it must have
-         carried, so the gap is still identifiable. So does a <em>tombstone</em>: the record a relocation leaves
-         of a page that was already unreadable when its block failed.</p>
+      <p>Take the next page of the open read, copying its payload into <code>buffer</code> and returning its
+         length. Pass <code>NULL</code> for <code>header</code> to ignore it. The header's <code>magic</code> is
+         the page's own record format, which differs from this build's only if
+         <code>NANDLOG_RECORD_FRAMING</code> changed during the epoch.</p>
+      <p><strong>Zero means a gap, not the end of the read.</strong> A gap is a page that could not be read, a
+         position the log passed over, or a tombstone (the placeholder a relocation leaves for a page that was
+         already unreadable). The header still carries the sequence number, so the host can ask for the page
+         again. Zero also comes back once the read has closed, so loop over the count from
+         <code>nandlog_read_span()</code>.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_retrieve_page_by_seq(uint32_t seq, uint8_t *buffer,
                                      nandlog_page_header_t *header);</pre>
-      <p>Fetch one page of the selected epoch &mdash; the current one unless an earlier one is selected
-         &mdash; by its sequence number, so a host can re-request what it lost. Returns zero, with the header
-         describing the gap, if that page cannot be produced. In the current epoch a sequence number is a
-         position, so this is one page read; in an earlier one it falls back to a binary search if a block
-         retired since has shifted positions. <strong>No read need be open</strong>, so a host can ask after a
-         read has run to its end. What comes back is what any read served under that sequence number, or a
-         gap.</p>
+      <p>Fetch one page of the selected epoch by sequence number, so that a host can re-request what it lost.
+         <strong>No read need be open</strong>, so a host can ask after a read has run to its end.
+         <code>header</code> must not be <code>NULL</code>. Returns zero for a gap, with a header that carries
+         the sequence number but no time bounds or record count.</p>
+      <p>In the current epoch a sequence number is a position, so this costs one page read. In an earlier epoch,
+         a block retired since may have shifted positions, so the log checks its first guess and falls back to a
+         binary search over page headers. What comes back is what any read served under that sequence number, or
+         a gap.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_read_recent_page(uint32_t pages_back, uint8_t *buffer,
                                   nandlog_page_header_t *header, bool *end_of_epoch);</pre>
-      <p>Walk backwards from the write head, newest page first, independently of any open read and without
-         needing a session. Zero means that page could not be read, which is not the end of the log;
-         <code>end_of_epoch</code> is the signal to stop, and is set on the epoch's first page whether or not
-         it could be read. <code>buffer</code> is sized as above, and may be <code>NULL</code>.</p>
+      <p>Walk backwards through the selected epoch, newest page first: <code>pages_back</code> 0 is its newest
+         page, which for the current epoch is the page just below the write head. It works independently of any open read. Zero means that page could not be
+         read, which is not the end of the log. <code>*end_of_epoch</code> is the signal to stop: it is set on
+         the epoch's first page, whether or not that page could be read, and when <code>pages_back</code> runs
+         past it. <code>buffer</code>, <code>header</code>, and <code>end_of_epoch</code> may each be
+         <code>NULL</code>. The header is filled in only when the page's own header reads valid.</p>
     </div>
 
     <div class="fn">
       <pre>bool nandlog_framed_next_record(const uint8_t *payload, uint32_t length, uint32_t *offset,
                                 const uint8_t **record, uint32_t *record_bytes);</pre>
-      <p>Step through the records of a payload belonging to a page that announced
-         <code>NANDLOG_PAGE_MAGIC_FRAMED</code>. Initialise <code>*offset</code> to zero and call until it
-         returns false. <code>*record</code> points at
-         <code>[type:1][timestamp:4][data]</code>.</p>
+      <p>Step through the records of a payload whose page header carries
+         <code>NANDLOG_PAGE_MAGIC_FRAMED</code>. Set <code>*offset</code> to zero and call until it returns
+         false, which it does at the end of the payload or at a record that would run past it. Each call points
+         <code>*record</code> at <code>[type:1][timestamp:4][data]</code> and sets <code>*record_bytes</code> to
+         5 plus the data length. <code>record</code> and <code>record_bytes</code> may be <code>NULL</code>.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_crc32(uint32_t crc, const void *data, uint32_t length);</pre>
-      <p>The CRC-32 the log writes and checks, continued over <code>length</code> more bytes exactly as Python's
-         <code>zlib.crc32(data, crc)</code> continues one: 0 begins a value, and the value returned for the bytes so
-         far goes on from them. A served page's <code>payload_crc</code> is <code>nandlog_crc32(0, buffer,
-         length)</code>. It is <code>nandlog_port_crc32()</code> in a build that sets <code>NANDLOG_PORT_CRC32</code>,
-         and the library's own software otherwise, which needs neither <code>nandlog_init()</code> nor the
-         library's lock.</p>
+      <p>The CRC-32 the log writes and checks, continued over <code>length</code> more bytes exactly as
+         Python's <code>zlib.crc32(data, crc)</code> continues one. Pass 0 to begin. A served page's
+         <code>payload_crc</code> is <code>nandlog_crc32(0, buffer, length)</code>. With
+         <code>NANDLOG_PORT_CRC32</code> set it calls <code>nandlog_port_crc32()</code>, and otherwise it runs the
+         library's software, which needs neither <code>nandlog_init()</code> nor the lock.
+         <code>nandlog_port.h</code> also declares <code>nandlog_crc32_software()</code>, the same CRC always in
+         software, for a port that checks its engine against it.</p>
     </div>
 
     <h3 id="long-download">Logging through a long download</h3>
 
-    <p>While a read is open, a record that would commit a page is refused (<code>NANDLOG_ERR_READING</code>), so a
-       download held open across a slow link stops logging once a page's worth of records is buffered. To go on
-       logging, open the read only to take its span &mdash; the first page's sequence number and the page count
-       &mdash; close it, and fetch the rest by sequence number, which needs no open read and finds each page
-       afresh, a relocation of the head's block included:</p>
-<pre><code>uint32_t first = 0, count = 0;
+    <p>While a read is open, a record that would commit a page is refused with
+       <code>NANDLOG_ERR_READING</code>. As a result, a download held open across a slow link stops logging once a
+       page's worth of records is buffered. To keep logging, open the read only long enough to take its span (the
+       first page's sequence number and the page count), close it, and fetch the rest by sequence number. That
+       needs no open read, and it finds each page afresh, even after a relocation of the head's block.</p>
+
+<pre><code>uint8_t page[NANDLOG_MAX_DATA_BYTES_PER_PAGE];
 nandlog_page_header_t header;
+uint32_t first = 0, count = 0;
 
 nandlog_begin_session();
 nandlog_begin_reading(start_ms, end_ms);       /* commits what is buffered, and resolves the window */
@@ -395,116 +473,124 @@ if (count)
    first = header.seq;                         /* a gap carries its sequence number too: send it */
 }
 nandlog_end_reading();
-nandlog_end_session();
 
 for (uint32_t seq = first + 1; seq &lt; (first + count); ++seq)
 {
    uint32_t length = nandlog_retrieve_page_by_seq(seq, page, &amp;header);
-   /* zero is a gap, header.seq says which; records stored between calls commit as usual */
-}</code></pre>
-    <p>The window is resolved once, by the short read, so nothing is lost there. A gap fetched by sequence number
-       comes back with a bare header &mdash; no time bounds or record count of its own, as an open read reports
-       when a page's header survives but its payload does not &mdash; and an exact byte total has to be taken
-       with <code>nandlog_read_span()</code> before the read is closed. Each fetch outside a session powers the
-       part up and down; hold a session around the loop to avoid that, which logging does not mind. This is for
-       the current epoch: writing stays refused while an earlier one is selected. The regression test N1 in
-       <code>sim/nandlog_sim_regress.c</code> fetches a span this way while every store commits a page and the
-       head's block is relocated and retired.</p>
+   /* zero is a gap, and header.seq says which; records stored meanwhile commit as usual */
+}
+nandlog_end_session();</code></pre>
 
-    <h2>Retransmission</h2>
+    <p>The window is resolved once, by the short read, so nothing is lost there. Three caveats remain.
+       First, a gap fetched by sequence number comes back with a bare header, without the time
+       bounds or record count an open read reports when a page's header survives but its payload does not.
+       Second, an exact byte total has to be taken with <code>nandlog_read_span()</code> before the read is
+       closed. Third, this works only for the current epoch, because writing stays refused while an earlier one
+       is selected. Holding the session around the loop keeps the part awake between fetches, and logging does
+       not mind it.</p>
 
-    <p>Sequence numbers are contiguous within an epoch, so a host knows exactly which pages it is missing.</p>
+    <h2 id="retransmission">Retransmission</h2>
+
+    <p>Sequence numbers are contiguous within an epoch, so a host knows exactly which pages it is missing. These
+       functions collect the host's list and serve the pages back, from the epoch selected at the time. Like
+       <code>nandlog_retrieve_page_by_seq()</code>, they need no open read.</p>
 
     <div class="fn">
       <pre>void nandlog_retransmit_clear(void);
 uint32_t nandlog_retransmit_add(const uint32_t *seqs, uint32_t count);
 uint32_t nandlog_retransmit_count(void);</pre>
-      <p>Accumulate the sequence numbers a host reports missing, across as many calls as it takes.
-         <code>nandlog_retransmit_add()</code> returns the number held; anything beyond
-         <code>NANDLOG_MAX_RETRANSMIT_PAGES</code> (256) is dropped.</p>
+      <p>Collect the sequence numbers a host reports missing, across as many calls as it takes.
+         <code>nandlog_retransmit_add()</code> returns the number now held, and anything beyond
+         <code>NANDLOG_MAX_RETRANSMIT_PAGES</code> (256) is dropped. <code>nandlog_init()</code> also clears the
+         list.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_retransmit_total_bytes(void);</pre>
-      <p>Exact total of the payload bytes the requested pages will deliver, for a host sizing a receive
-         buffer &mdash; exact as <code>nandlog_read_span()</code>'s is. Costs a read of each requested page.
-         Like <code>nandlog_retrieve_page_by_seq()</code>, the retransmission calls need no open read.</p>
+      <p>The exact payload bytes the requested pages will deliver, for a host sizing a receive buffer. It is
+         exact in the same sense as <code>nandlog_read_span()</code>'s total, and costs a read of each requested
+         page.</p>
     </div>
 
     <div class="fn">
       <pre>uint32_t nandlog_retrieve_retransmit_page(uint32_t index, uint8_t *buffer,
                                           nandlog_page_header_t *header);</pre>
-      <p>Serve the <code>index</code>-th requested page. An index past the end yields a zero-length page
-         rather than nothing, so the host can tell "still missing" from "never answered".</p>
+      <p>Serve the <code>index</code>-th requested page, as <code>nandlog_retrieve_page_by_seq()</code> would.
+         <code>header</code> must not be <code>NULL</code>. A page that is still unreadable comes back with zero
+         length and its sequence number. An index past the end also yields a zero-length page rather than
+         nothing, so the host can tell "still missing" from "never answered".</p>
     </div>
 
-    <h2>Diagnostics</h2>
+    <h2 id="diagnostics">Diagnostics</h2>
+
+    <p>Two functions report the part's health and the log's running totals. Both answer from RAM, so they cost
+       nothing on the bus.</p>
 
     <div class="fn">
       <pre>uint32_t nandlog_bad_block_count(void);</pre>
       <p>How many blocks across the metadata ring and the log region are retired, factory-marked and grown
-         alike. Answers from RAM: the figure is recomputed when the log comes up and whenever a block is
-         retired, so reading it is free.</p>
-      <p>Useful as a health indicator over a part's life. A count that climbs steadily is a part approaching
-         the end of its endurance; a count that jumps is worth investigating.</p>
+         alike. Over a part's life, a count that climbs steadily means the part is nearing the end of its
+         endurance, and a count that jumps is worth investigating.</p>
     </div>
 
     <div class="fn">
       <pre>void nandlog_get_stats(nandlog_stats_t *stats);</pre>
-      <p>Running totals since <code>nandlog_init()</code>, from RAM.</p>
+      <p>Copy out the running totals since <code>nandlog_init()</code>. Records are counted at the API, and pages
+         and blocks on the part.</p>
 <pre><code>typedef struct
 {
-   uint32_t records_stored;      /* store_record() calls that returned NANDLOG_OK      */
-   uint32_t records_refused;     /* calls that returned anything else                  */
-   uint32_t records_lost;        /* stored in RAM, but their page could not be committed */
-   uint32_t pages_committed;     /* written and verified by reading back               */
-   uint32_t pages_relocated;     /* moved out of a failing block, tombstones included  */
-   uint32_t tombstones_written;  /* relocated pages that were already unreadable       */
-   uint32_t positions_skipped;   /* sequence numbers the last boot passed over: torn   */
-                                 /*   pages (and with NANDLOG_PASS_OVER_HEAD_AT_BOOT  */
-                                 /*   the head's page), listed, never programmed again */
-   uint32_t blocks_retired;      /* by the log, persistently                           */
-   uint32_t reads_at_ecc_limit;  /* reads the part corrected at the limit of its ECC   */
+   uint32_t records_stored;      /* nandlog_store_record() calls that returned NANDLOG_OK  */
+   uint32_t records_refused;     /* calls that returned anything else                     */
+   uint32_t records_lost;        /* stored in RAM, but their page could not be committed  */
+   uint32_t pages_committed;     /* written and verified by reading back                  */
+   uint32_t pages_relocated;     /* moved out of a failing block, tombstones included     */
+   uint32_t tombstones_written;  /* relocated pages that were already unreadable          */
+   uint32_t positions_skipped;   /* sequence numbers the last boot passed over            */
+   uint32_t blocks_retired;      /* blocks the log retired, persistently                  */
+   uint32_t reads_at_ecc_limit;  /* reads the part corrected only at the limit of its ECC */
 } nandlog_stats_t;</code></pre>
-      <p>A page the part corrects only at the limit of its ECC is delivered, but the next bit to go will not
-         be corrected, and nothing rewrites a page in place: a part that keeps turning these up is wearing
-         out. The count includes the boot's reads of the newest metadata slot; a copy of it read so is written
-         again elsewhere, at that boot.</p>
+      <p>Records still in RAM at a reset or a <code>nandlog_deinit()</code> are not counted as lost. A page the
+         part corrects only at the limit of its ECC is still delivered, but the next bit to fail will not be
+         corrected, and nothing rewrites a log page in place. A part that keeps adding to
+         <code>reads_at_ecc_limit</code> is wearing out. The count includes reads of metadata slots, and a boot
+         that reads its newest slot at the limit writes that slot again (see
+         <a href="durability.html#wear">Durability</a>).</p>
     </div>
 
-    <h2>Recovery</h2>
+    <h2 id="recovery">Recovery</h2>
+
+    <p>One utility exists for a part whose bad-block table has gone wrong. Most applications never call it.</p>
 
     <div class="fn">
       <pre>void nandlog_reset_bad_block_table(void);</pre>
-      <p>Discard the persisted bad-block table so it is rebuilt on the next boot. What this can achieve
-         depends on the part: one that remaps in hardware cannot forget, and keeps its table; the Alliance driver
-         rebuilds from the factory markers <em>and</em> from the markers it writes into every block it retires,
-         so a retirement survives it. Every boot checks that each block the table names carries its marker, reading
-         exactly <code>00h</code>, and programs again one that does not &mdash; a marker a cut left part-way can read
-         as a marker once and as none the next time; the utility programs every one again first, and keeps the
-         table if any block it names then does not read <code>00h</code>, since a rebuild would forget that block. It never erases a marked block, and erases
-         the block holding the newest table version last, and only once every older one is gone, so neither a
-         cut nor a block that will not erase can leave an older version to be loaded. A table kept below the reserve
-         is in two blocks the log gave up, which must stay retired, so they are marked rather than erased, the
-         newest version's last, which passes over every version in them. The rebuild reads markers
-         with ECC off, so a block whose first page merely reads uncorrectable is not taken for a marked one, and
-         the table in RAM stands until the reboot, so logging may carry on meanwhile. If the rebuilt table still
-         lays the current epoch out differently from what its metadata slot recorded, the epoch is sealed
-         (<code>NANDLOG_ERR_SEALED</code>): begin a new one. The outcome is reported through
-         <code>nandlog_port_log()</code>.</p>
+      <p>Discard the persisted bad-block table, so that the next boot rebuilds it. Call it only after
+         <code>nandlog_init()</code> has succeeded. What it can achieve depends on the part. The Alliance driver
+         rebuilds from the factory markers and from the markers it writes into every block it retires, so a
+         retirement survives the reset, and it keeps the table if any listed block's marker does not read back.
+         The Winbond part remaps blocks in hardware and cannot forget them, so its driver keeps the table.</p>
+      <p>The table in RAM stands until the reboot, so logging can carry on meanwhile. If the rebuilt table lays
+         the current epoch out differently from what its metadata slot recorded, the next boot seals the epoch,
+         and you must begin a new one. The outcome is reported only through <code>nandlog_port_log()</code>. See
+         <a href="durability.html#bad-blocks">Durability</a> for how retirement works.</p>
     </div>
 
-    <h2>Version macros</h2>
+    <h2 id="versions">Version macros</h2>
+
+    <p><code>nandlog.h</code> versions the library and the on-flash format separately. This release is version
+       1.0 of the library and version&nbsp;1 of the format.</p>
 
 <pre><code>#define NANDLOG_VERSION_MAJOR    1
 #define NANDLOG_VERSION_MINOR    0
+#define NANDLOG_VERSION_AT_LEAST(major, minor)   /* true if this build is that version or later */
 
-#define NANDLOG_VERSION_AT_LEAST(major, minor)   /* ... */</code></pre>
+#define NANDLOG_FORMAT_VERSION   1               /* recorded in every metadata slot */</code></pre>
 
-    <p>Major changes when something you built against must change &mdash; a structure that moves on flash or
-       on the wire, a function that is renamed or whose meaning shifts. Minor changes for additions.
-       <code>NANDLOG_FORMAT_VERSION</code> is separate and versions what a build writes on the part; this is
-       version&nbsp;1 of both. See <a href="format.html">On-Flash Format</a>.</p>
+    <p>The major number changes when something you built against has to change to keep working, so an
+       application can refuse to build against the wrong one with
+       <code>#if (NANDLOG_VERSION_MAJOR != 1)</code>. The minor number changes for additions, such as new
+       functions, options, or chip drivers, and <code>NANDLOG_VERSION_AT_LEAST()</code> tests for them.
+       <code>NANDLOG_FORMAT_VERSION</code> versions what a build writes on the part, and moves independently of
+       the library version. See <a href="format.html#format-versions">On-Flash Format</a>.</p>
 
     <footer>
       <p>nandlog is MIT-licensed. <a href="https://github.com/hedgetechllc/nandlog">Source on GitHub</a>.</p>

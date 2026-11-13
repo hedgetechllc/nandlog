@@ -1,441 +1,388 @@
 <!-- title: Performance | desc: What each nandlog operation costs in flash operations and RAM, with measured figures from a 4 KB-page part. -->
-    <h1>Performance</h1>
-    <p class="lede">What each call costs, in flash operations rather than wall-clock.</p>
+<h1>Performance</h1>
+    <p class="lede">What each call costs in flash operations, in time on a real board, and in RAM. Read this page
+       to size a system around nandlog.</p>
 
-    <p>Flash operations dominate everything else by orders of magnitude, so that is the unit. Symbols:</p>
+    <p>A page read, a program, or an erase takes hundreds of microseconds to milliseconds, while the library's own
+       work between them takes tens of microseconds. This page therefore counts each call's cost in flash operations
+       first, then gives what those operations take on real hardware.</p>
+
+    <p>The measured figures come from the on-device benchmark, <code>tests/test_nandlog_bench.c</code>, run on an
+       Ambiq Apollo4 Plus (Cortex-M4F at 96&nbsp;MHz, 48&nbsp;MHz SPI) with the Alliance AS5F18G04SND, on-die ECC on,
+       and the 1.0 library. On that board:</p>
+
+    <ul>
+      <li>A <code>nandlog_store_record()</code> that only buffers takes 17&ndash;50&nbsp;&micro;s, and one that
+          commits a 4&nbsp;KB page about 3.0&nbsp;ms.</li>
+      <li>Erasing a block ahead of the write head, where the next page goes, takes 1.0&ndash;3.5&nbsp;ms, and no
+          call both commits a page and erases a block.</li>
+      <li>A warm boot takes 82&ndash;89&nbsp;ms.</li>
+      <li>Serving a page takes about 1.1&nbsp;ms, and resolving a time bound about 0.3&nbsp;ms for each page of the
+          epoch it reads.</li>
+      <li>The library and the Alliance driver use 16.4&nbsp;KB of static RAM, and nothing is allocated.</li>
+    </ul>
+
+    <p>Every loop has a stated bound, so a part that stops working ends in <code>nandlog_port_unwritable()</code> or
+       <code>nandlog_port_fatal()</code>, never in a hang. If you are sizing a system, read
+       <a href="#complexity">Complexity</a>, <a href="#boot">Boot</a>, <a href="#blocking">Blocking time</a>, and
+       <a href="#memory">Memory</a>. The other sections give the simulator's exact counts and the measurements behind
+       each figure.</p>
+
+    <h2 id="complexity">Complexity</h2>
+
+    <p>The table gives each call's flash work. A <em>header read</em> latches a page and clocks out 32 bytes. A
+       <em>raw read</em> latches a page with the part's ECC off and clocks out the whole page and spare area, which is
+       how the log shows that a page is blank. An <em>epoch</em> is one generation of the log, and its metadata
+       <em>slot</em>, written to a pair of pages in the metadata ring, records it. The <em>window</em> is the
+       <code>NANDLOG_ERASE_AHEAD_BLOCKS</code> blocks the log keeps erased ahead of the <em>write head</em>, the
+       position the next page goes to. <a href="format.html">On-Flash Format</a> defines these in full.</p>
 
     <div class="tablewrap">
     <table>
       <thead><tr><th>Symbol</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><strong>E</strong></td><td>pages in the selected epoch</td></tr>
-        <tr><td><strong>S</strong></td><td>pages an open read will deliver</td></tr>
-        <tr><td><strong>N</strong></td><td>good pages in the log region: pages of blocks that are not retired</td></tr>
-        <tr><td><strong>P</strong></td><td>pages per block</td></tr>
-        <tr><td><strong>R</strong></td><td>retired blocks in the log region, held sorted in RAM</td></tr>
-        <tr><td><strong>C</strong></td><td>blocks on the part</td></tr>
-        <tr><td><strong>r</strong></td><td>pending retransmission requests</td></tr>
+        <tr><td><strong>N</strong></td><td>Good pages in the log region: the pages of blocks that are not retired</td></tr>
+        <tr><td><strong>E</strong></td><td>Pages in the selected epoch</td></tr>
+        <tr><td><strong>S</strong></td><td>Pages an open read will deliver</td></tr>
+        <tr><td><strong>R</strong></td><td>Retired blocks in the log region, held sorted in RAM</td></tr>
+        <tr><td><strong>B</strong></td><td>Entries in the driver's bad-block table</td></tr>
+        <tr><td><strong>C</strong></td><td>Blocks on the part</td></tr>
+        <tr><td><strong>r</strong></td><td>Pending retransmission requests</td></tr>
       </tbody>
     </table>
     </div>
-
-    <h2>Complexity</h2>
-
-    <p>A <em>header read</em> latches a page and clocks out 32 bytes; a <em>raw read</em> latches a page with
-       the part's ECC turned off and clocks out the whole page and spare, which is how a page is shown to be
-       blank.</p>
 
     <div class="tablewrap">
     <table>
       <thead><tr><th>Call</th><th>Flash work</th></tr></thead>
       <tbody>
-        <tr><td><code>nandlog_probe()</code></td><td>O(1) &mdash; one identity read, no page reads</td></tr>
-        <tr><td><code>nandlog_init()</code>, first ever boot</td><td><strong>O(C)</strong> page reads &mdash; one per block, with ECC off, for the factory bad-block markers &mdash; then the table written to a pair of pages and verified</td></tr>
-        <tr><td><code>nandlog_init()</code>, every boot after</td><td><strong>O(log N + R)</strong>: the driver's table (about 24 reads on the Alliance part, two of them raw, to find the newest version and check that both its copies were written whole, then one one-byte read with ECC off per table entry, to check its block's marker, and per table block holding a version), 8 header reads and a binary search of one block for the ring, then the newest pair's two copies, each read once as a whole image &mdash; header, details and passed-over list &mdash; and a few reads, two raw, to check nothing was written after it; &lceil;log<sub>2</sub>(N&nbsp;+&nbsp;1)&rceil; probes for the write head &mdash; each a header read, plus a raw read when the header reads erased &mdash; a header read past the answer to check it, one whole-page read of the page below the head to check it reads whole, and a few header reads to look for a newer epoch the ring has lost; then the erase-ahead window re-erased: 2 erases, 3 if the head is on a block boundary. An unreadable probe adds a header read for each position of the run of unreadable positions directly below it. After a cut in a metadata write, the boot also writes the table or the slot again, before anything else, and after a cut that tore a page it writes the slot again to list it: one more pair of programs</td></tr>
-        <tr><td><code>nandlog_deinit()</code></td><td>O(1)</td></tr>
-        <tr><td><code>nandlog_data_bytes_per_page()</code></td><td>none</td></tr>
-        <tr><td><code>nandlog_store_record()</code></td><td>none directly; amortized one page commit per page's worth of records</td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; one page commit, good case</td><td>1 program + 1 read-back of the header and payload, compared byte for byte</td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; one page commit, block fails</td><td>a metadata slot pair recording the failed page, then &le; <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> blocks in all: per extra block, 1 erase + per page already in the failing block a header read, a copy, and a header read of the copy (or a page read, program and read-back without internal copy) + 1 table update, a pair of pages</td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; once per block written</td><td>1 erase, in a call that commits no page</td></tr>
-        <tr><td><code>nandlog_flush(true)</code></td><td>one page commit</td></tr>
-        <tr><td><code>nandlog_flush(false)</code></td><td>none, or the one erase the window is due</td></tr>
-        <tr><td><code>nandlog_begin_epoch()</code></td><td>a commit if anything is buffered, then 1 slot written to a pair of pages, with a raw read before and a read-back after each (an erase instead of the raw read on entering a ring block), then 1 + <code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases</td></tr>
-        <tr><td><code>nandlog_retrieve_epoch_details()</code></td><td>1 page read</td></tr>
-        <tr><td><code>nandlog_epoch_count()</code> / <code>_info()</code></td><td>about one header read per epoch listed, walking back from the current one, plus a few per ring block stepped into</td></tr>
-        <tr><td><code>nandlog_select_epoch()</code></td><td>the same walk, plus the header reads of one or two blocks, from the end back, for where the epoch ended</td></tr>
-        <tr><td><code>nandlog_select_current_epoch()</code></td><td>none</td></tr>
-        <tr><td><code>nandlog_begin_reading(0, 0)</code></td><td>none, or one page commit if records of the current epoch are buffered</td></tr>
+        <tr><td><code>nandlog_probe()</code></td><td>One identity read</td></tr>
+        <tr><td><code>nandlog_init()</code>, first boot</td><td><strong>O(C)</strong>: one ECC-off read of each block's mark, then the table written to a pair of pages and verified</td></tr>
+        <tr><td><code>nandlog_init()</code>, every later boot</td><td><strong>O(log N + B)</strong>: the driver's table, 18&ndash;20 reads for the ring, about log<sub>2</sub>&nbsp;N probes for the write head, and 2 or 3 erases (details below)</td></tr>
+        <tr><td><code>nandlog_store_record()</code></td><td>None directly. One page commit per page's worth of records, and at most one erase in a call that commits nothing</td></tr>
+        <tr><td>&nbsp;&nbsp;One page commit</td><td>1 program and 1 read-back of header and payload, compared byte for byte</td></tr>
+        <tr><td>&nbsp;&nbsp;A commit whose block fails</td><td>A slot pair recording the failed page, then up to <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> blocks in all (details below)</td></tr>
+        <tr><td><code>nandlog_flush(true)</code></td><td>One page commit</td></tr>
+        <tr><td><code>nandlog_flush(false)</code></td><td>None, or the one erase the window is due</td></tr>
+        <tr><td><code>nandlog_begin_epoch()</code></td><td>A commit if records are buffered, a slot written to a pair of pages, then 1&nbsp;+&nbsp;<code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases</td></tr>
+        <tr><td><code>nandlog_retrieve_epoch_details()</code></td><td>1 page read, 2 if the first copy's details do not check</td></tr>
+        <tr><td><code>nandlog_epoch_count()</code>, <code>_info()</code></td><td>One 64-byte read per slot walked back over, and about seven per ring block stepped into</td></tr>
+        <tr><td><code>nandlog_select_epoch()</code></td><td>The same walk, plus header reads of up to two blocks, from the end back, to find where the epoch ended</td></tr>
+        <tr><td><code>nandlog_begin_reading(0, 0)</code></td><td>None, or one page commit if records are buffered</td></tr>
         <tr><td><code>nandlog_begin_reading(t, 0)</code></td><td><strong>O(E)</strong> header reads, stopping at the first page that reaches the bound</td></tr>
-        <tr><td><code>nandlog_begin_reading(0, t)</code></td><td><strong>O(E)</strong> header reads &mdash; a full pass over the epoch, always</td></tr>
+        <tr><td><code>nandlog_begin_reading(0, t)</code></td><td><strong>O(E)</strong> header reads: a full pass over the epoch, always</td></tr>
         <tr><td><code>nandlog_begin_reading(t0, t1)</code></td><td><strong>O(E)</strong> header reads, up to 2E</td></tr>
-        <tr><td><code>nandlog_read_span(&amp;pages, NULL)</code></td><td>none &mdash; the page count is arithmetic</td></tr>
+        <tr><td><code>nandlog_read_span(&amp;pages, NULL)</code></td><td>None: the count is arithmetic</td></tr>
         <tr><td><code>nandlog_read_span(&amp;pages, &amp;bytes)</code></td><td><strong>O(S)</strong> whole-page reads</td></tr>
         <tr><td><code>nandlog_retrieve_next_page()</code></td><td>1 page read</td></tr>
-        <tr><td><code>nandlog_retrieve_page_by_seq()</code></td><td>1 page read in the current epoch, where a sequence number is a position; in an earlier one, O(log E) and O(E) at worst if a block retired since has shifted its positions</td></tr>
-        <tr><td><code>nandlog_retransmit_clear/add/count()</code></td><td>none; O(count) in RAM</td></tr>
-        <tr><td><code>nandlog_retransmit_total_bytes()</code></td><td><strong>r</strong> page reads in the current epoch; in an earlier one, r lookups as for <code>retrieve_page_by_seq()</code></td></tr>
-        <tr><td><code>nandlog_retrieve_retransmit_page()</code></td><td>1 page read in the current epoch; in an earlier one, as for <code>retrieve_page_by_seq()</code></td></tr>
-        <tr><td><code>nandlog_read_recent_page(k)</code></td><td>1 page read; O(R) arithmetic to find it</td></tr>
-        <tr><td><code>nandlog_framed_next_record()</code></td><td>none</td></tr>
+        <tr><td><code>nandlog_retrieve_page_by_seq()</code></td><td>1 page read in the current epoch. In an earlier one, a header read to check the guess, then O(log E), or O(E) at worst, if a block retired since has shifted its positions</td></tr>
+        <tr><td><code>nandlog_retransmit_total_bytes()</code></td><td><strong>r</strong> lookups as for <code>retrieve_page_by_seq()</code></td></tr>
+        <tr><td><code>nandlog_retrieve_retransmit_page()</code></td><td>As for <code>retrieve_page_by_seq()</code></td></tr>
+        <tr><td><code>nandlog_read_recent_page(k)</code></td><td>1 page read, and O(R) arithmetic to find it</td></tr>
+        <tr><td><code>nandlog_reset_bad_block_table()</code></td><td>A recovery utility: every entry's mark programmed and read back, and the table's blocks erased</td></tr>
+        <tr><td>All other calls</td><td>None</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>Turning a position into a page is arithmetic over the sorted list of retired blocks, O(R), with no flash
-       access. A part with more retired blocks than the list holds (<code>NANDLOG_MAX_TRACKED_RETIRED_BLOCKS</code>,
-       128 by default) still works, asking the driver block by block instead.</p>
+    <p><strong>A boot</strong> reads the Alliance driver's table in about 21 reads, plus one ECC-off mark read per
+       table entry. The write head takes &lceil;log<sub>2</sub>(N&nbsp;+&nbsp;1)&rceil; probes and at most three more,
+       each a header read plus a raw read if the header reads erased. After a power cut during a metadata write, or
+       one that tore a page, the boot also writes one more pair of pages. <a href="format.html#newest-epoch">On-Flash
+       Format</a> gives each step's reads.</p>
 
-    <h2>Bus traffic versus flash time</h2>
+    <p><strong>A commit whose block fails</strong> pays, for each further block it tries, 1 erase and, per page
+       already in the failing block, a whole-page read, a copy, and a header read of the copy. Retiring the block
+       costs a table version and a slot pair. Turning a position into a page is arithmetic over the sorted list of
+       retired blocks, O(R), with no flash access.</p>
 
-    <div class="note">
-      <p>Almost everything the log reads is a 32-byte header out of a 4&nbsp;KB page, so it reads 32 bytes.
-         Boot, the write-head search, the time-bound seek and the sequence-number lookup all use
-         <code>nandlog_chip_read_page_region()</code>. Only <code>nandlog_read_span()</code>'s byte pass
-         needs a whole page, because it verifies payload CRCs.</p>
-      <p>This saves bus time, not flash time: page-read <em>counts</em> in the table above are unaffected.
-         <strong>How much that is worth depends on the platform, and is usually less than the byte counts
-         suggest</strong> &mdash; see the measurements below.</p>
-    </div>
+    <h2 id="bus">Bus traffic versus flash time</h2>
 
-    <h2>Measured: operation counts</h2>
+    <p>Almost every read the log makes to find something is a 32-byte header, through
+       <code>nandlog_chip_read_page_region()</code>. It clocks out more only to verify a commit, to serve or total a
+       page, to move one, and at boot to judge a slot or the page below the head. This saves bus time, not flash time: on the
+       bench, a header read still costs 29&nbsp;% of a whole-page read, because the part's page latch dominates (see
+       <a href="#reads">What a read costs</a>).</p>
 
-    <p>Simulator figures for the Alliance AS5F18G04SND &mdash; 4&nbsp;KB pages, 64 pages per block, 4096
-       blocks, 7 of them factory-bad &mdash; with internal page copy on. A <em>latch</em> is one page read
-       command, of whatever length; the raw ones are counted within it.</p>
+    <h2 id="opcounts">Simulator operation counts</h2>
+
+    <p>These are exact counts from the simulator, for the Alliance part's geometry: 4&nbsp;KB pages, 64 pages a
+       block, and 4,096 blocks, 7 of them factory-bad, with the internal page copy on. A <em>latch</em> is one page-read
+       command, of any length, and raw reads are counted within it.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Operation</th><th>Latches (raw)</th><th>Programs</th><th>Erases</th><th>Bus read</th></tr></thead>
+      <thead><tr><th>Operation</th><th>Latches (raw)</th><th>Programs</th><th>Erases</th><th>Bytes read</th></tr></thead>
       <tbody>
-        <tr><td>First ever boot</td><td>4121 (4103)</td><td>3</td><td>1</td><td>23.2 kB</td></tr>
-        <tr><td>Warm boot, no epoch begun</td><td>36 (10)</td><td>0</td><td>0</td><td>20.8 kB</td></tr>
-        <tr><td>Warm boot, one 100-page epoch</td><td>83 (24)</td><td>0</td><td>2</td><td>95.1 kB</td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; of which the driver's table, its marks and the OTP check</td><td>29 (10)</td><td>0</td><td>0</td><td>20.3 kB</td></tr>
-        <tr><td>Warm boot, a retired block inside the epoch</td><td>79 (19)</td><td>1</td><td>2</td><td>99.5 kB</td></tr>
-        <tr><td>Warm boot, 101 epochs in the ring</td><td>89 (29)</td><td>0</td><td>2</td><td>116.9 kB</td></tr>
-        <tr><td>Warm boot, 521 epochs, ring wrapped</td><td>91 (29)</td><td>0</td><td>2</td><td>117.0 kB</td></tr>
-        <tr><td>Warm boot, 20,000-page epoch</td><td>81 (20)</td><td>0</td><td>2</td><td>77.7 kB</td></tr>
-        <tr><td>Warm boot, 220,000-page epoch</td><td>76 (16)</td><td>0</td><td>2</td><td>60.3 kB</td></tr>
-        <tr><td>Warm boot after a cut tore a commit, listing it</td><td>82 (18)</td><td>2</td><td>2</td><td>103.7 kB</td></tr>
-        <tr><td>A commit of a full page</td><td>1</td><td>1</td><td>0</td><td>4.1 kB</td></tr>
-        <tr><td>A commit of a 20-byte partial page</td><td>1</td><td>1</td><td>0</td><td>52 B</td></tr>
-        <tr><td>An idle <code>flush(false)</code> carrying the erase-ahead</td><td>0</td><td>0</td><td>1</td><td>2 B</td></tr>
-        <tr><td><code>begin_epoch()</code></td><td>3 (1)</td><td>2</td><td>3</td><td>4.5 kB</td></tr>
-        <tr><td><code>epoch_count()</code>, 16 listed</td><td>30</td><td>0</td><td>0</td><td>1.6 kB</td></tr>
-        <tr><td><code>select_epoch()</code>, an earlier 100-page epoch</td><td>48</td><td>0</td><td>0</td><td>2.2 kB</td></tr>
-        <tr><td><code>begin_reading(t0, t1)</code> over a 400-page epoch</td><td>504</td><td>0</td><td>0</td><td>17.1 kB</td></tr>
-        <tr><td><code>begin_reading()</code> with records buffered: their commit</td><td>1</td><td>1</td><td>0</td><td>52 B</td></tr>
-        <tr><td><code>retrieve_page_by_seq()</code>, <code>retrieve_next_page()</code></td><td>1</td><td>0</td><td>0</td><td>4.1 kB</td></tr>
-        <tr><td>A commit that relocates 40 pages and retires the block</td><td>133 (4)</td><td>49</td><td>1</td><td>193.2 kB</td></tr>
-        <tr><td>The same, block failing at its last page: 63 pages</td><td>202 (4)</td><td>72</td><td>1</td><td>288.3 kB</td></tr>
-        <tr><td>The worst the placement bound allows: two targets each refuse their last copy</td><td>396 (7)</td><td>139</td><td>2</td><td>559.6 kB</td></tr>
+        <tr><td>First boot, factory-fresh part</td><td>4,217 (4,103)</td><td>3</td><td>1</td><td>24,938</td></tr>
+        <tr><td>Warm boot, no epoch yet</td><td>36 (10)</td><td>0</td><td>0</td><td>20,790</td></tr>
+        <tr><td>Warm boot, one 100-page epoch</td><td>83 (24)</td><td>0</td><td>2</td><td>95,064</td></tr>
+        <tr><td>&nbsp;&nbsp;of which the driver's table and OTP check</td><td>29 (10)</td><td>0</td><td>0</td><td>20,327</td></tr>
+        <tr><td>Warm boot, 101 epochs in the ring</td><td>89 (29)</td><td>0</td><td>2</td><td>116,868</td></tr>
+        <tr><td>Warm boot, 521 epochs, the ring wrapped</td><td>91 (29)</td><td>0</td><td>2</td><td>116,968</td></tr>
+        <tr><td>Warm boot, 20,000-page epoch</td><td>81 (20)</td><td>0</td><td>2</td><td>77,748</td></tr>
+        <tr><td>Warm boot, 220,000-page epoch</td><td>76 (16)</td><td>0</td><td>2</td><td>60,298</td></tr>
+        <tr><td>Warm boot after a power cut tore a commit, passing it over</td><td>82 (18)</td><td>2</td><td>2</td><td>103,749</td></tr>
+        <tr><td>Warm boot, a block retired inside the epoch</td><td>79 (19)</td><td>1</td><td>2</td><td>99,469</td></tr>
+        <tr><td>Warm boot, the table kept below the reserve</td><td>203 (58)</td><td>0</td><td>2</td><td>105,930</td></tr>
+        <tr><td>Warm boot in degraded mode, marks only</td><td>4,301 (4,188)</td><td>78</td><td>2</td><td>105,180</td></tr>
+        <tr><td>A commit of a full page</td><td>1</td><td>1</td><td>0</td><td>4,101</td></tr>
+        <tr><td>A commit of a 20-byte partial page</td><td>1</td><td>1</td><td>0</td><td>52</td></tr>
+        <tr><td><code>flush(false)</code> carrying the erase-ahead</td><td>0</td><td>0</td><td>1</td><td>2</td></tr>
+        <tr><td><code>begin_epoch()</code></td><td>3 (1)</td><td>2</td><td>3</td><td>4,506</td></tr>
+        <tr><td><code>epoch_count()</code>, 16 listed</td><td>30</td><td>0</td><td>0</td><td>1,596</td></tr>
+        <tr><td><code>select_epoch()</code>, an earlier 100-page epoch</td><td>48</td><td>0</td><td>0</td><td>2,240</td></tr>
+        <tr><td><code>begin_reading(t0, t1)</code>, 403-page epoch</td><td>504</td><td>0</td><td>0</td><td>17,136</td></tr>
+        <tr><td><code>retrieve_next_page()</code>, <code>retrieve_page_by_seq()</code></td><td>1</td><td>0</td><td>0</td><td>4,098</td></tr>
+        <tr><td>A commit that relocates 40 pages and retires the block</td><td>133 (4)</td><td>49</td><td>1</td><td>193,152</td></tr>
+        <tr><td>The same, the block failing at its last page: 63 pages</td><td>202 (4)</td><td>72</td><td>1</td><td>288,257</td></tr>
+        <tr><td>The worst the placement bound allows: two targets each refuse their last copy</td><td>396 (7)</td><td>139</td><td>2</td><td>559,643</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>Over 300 consecutive commits, none also erased: every erase landed in an idle call, one per 64
-       pages. A warm boot falls as the epoch grows, because more of the search's probes land on written pages,
-       whose headers settle them, and fewer on erased pages, which need a raw read; the first four probes are
-       rotated from boot to boot (see <a href="#boot">Boot</a>), so a boot's count moves by a few latches either
-       way. A relocation reads each page it moves whole, once, so that the page is judged from a single read
-       &mdash; a page a cut tore can read differently from one read to the next &mdash; and only a page that reads
-       whole is then copied inside the part. A relocation's programs are
-       the copies, the page itself, the metadata slot recording the failure and the retirement (two pairs), the
-       table's new version (a pair) and the retired block's spare-area mark. The block in that example refuses
-       every program, its mark included, so each boot after tries the mark once more: the one program in the
-       boot after it. A metadata slot is read as a whole page, once, and each bad-block table page the driver
-       reads as its header and entries together, once, which between them are most of the bus bytes a boot reads
-       with ECC on. <code>make opcounts</code> in <code>sim/</code> regenerates every figure here, splits each
-       call's reads by how much they clock out &mdash; at most 64 bytes, less than a page, a page, a page and its
-       spare area &mdash; and runs the relocations again without the internal copy, where every page also crosses
-       the bus on its way out: 355&nbsp;kB read and 197&nbsp;kB written for the 40-page relocation, 1.06&nbsp;MB and
-       563&nbsp;kB for the worst case, against 193&nbsp;kB and 33&nbsp;kB, and 560&nbsp;kB and 47&nbsp;kB, with it.</p>
+    <p>In 300 consecutive commits, every erase landed in a call that committed nothing. A warm boot reads less as
+       the epoch grows, because more of the search's probes land on written pages, which a header read settles, and
+       fewer on erased pages, which need a raw read. The rotated probes move a boot's count by a few latches either
+       way. In <a href="format.html#bad-block-table">degraded mode</a>, every boot rebuilds the table from all 4,096 marks and programs each entry's mark again.
+       <code>make opcounts</code> in <code>sim/</code> regenerates every figure here, and splits each call's reads by
+       how much they clock out.</p>
 
-    <h2>Measured: what a read actually costs</h2>
+    <h2 id="reads">What a read costs</h2>
 
-    <p>Measured on an Ambiq Apollo4 Plus at 48&nbsp;MHz SPI with on-die ECC enabled, using the DWT cycle
-       counter.</p>
-
-    <figure>
-      <svg class="dia" viewBox="0 0 640 200" role="img" aria-label="A whole-page read costs 1188 microseconds and a header read 495, of which 490 is fixed overhead in both cases.">
-        <text x="20" y="18" class="hd">What a read costs, and what it is made of</text>
-
-        <text x="20" y="54" class="mono">whole page</text>
-        <rect class="bar2" x="130" y="40" width="181" height="22"/>
-        <rect class="bar"  x="311" y="40" width="292" height="22"/>
-        <text x="220" y="56" text-anchor="middle" class="sm" style="fill:var(--d-text)">431 fixed</text>
-        <text x="457" y="56" text-anchor="middle" class="sm" style="fill:#fff">695 &micro;s of data (4096 B)</text>
-        <text x="20" y="74" class="sm">1126 &micro;s</text>
-
-        <text x="20" y="114" class="mono">32-byte header</text>
-        <rect class="bar2" x="130" y="100" width="181" height="22"/>
-        <rect class="bar"  x="311" y="100" width="2"   height="22"/>
-        <text x="220" y="116" text-anchor="middle" class="sm" style="fill:var(--d-text)">431 fixed</text>
-        <text x="323" y="116" class="sm">5 &micro;s of data</text>
-        <text x="20" y="134" class="sm">436 &micro;s</text>
-
-        <line x1="130" y1="150" x2="629" y2="150"/>
-        <text x="130" y="166" class="sm">0</text>
-        <text x="336" y="166" text-anchor="middle" class="sm">500</text>
-        <text x="546" y="166" text-anchor="middle" class="sm">1000</text>
-        <text x="629" y="166" text-anchor="end" class="sm">&micro;s</text>
-
-        <text x="130" y="190" class="sm" style="fill:var(--d-accent)">Reading 128&times; fewer bytes takes 2.6&times; less time, not 128&times;: the fixed cost dominates.</text>
-      </svg>
-      <figcaption><b>Figure 1.</b> Measured on an Apollo4 Plus at 48&nbsp;MHz SPI. Fitting the two points
-        gives 0.17&nbsp;&micro;s per byte &mdash; 98.2&nbsp;% of wire speed &mdash; and 431&nbsp;&micro;s of
-        fixed cost per read, of which at least 361&nbsp;&micro;s is the part's own page latch.</figcaption>
-    </figure>
+    <p>On the bench, a read's cost is mostly fixed, so reading fewer bytes saves less time than the byte counts
+       suggest. Medians:</p>
 
     <div class="tablewrap">
     <table>
       <thead><tr><th>Read</th><th>Bytes</th><th>Time</th></tr></thead>
       <tbody>
-        <tr><td>Page header only</td><td>32</td><td>436&nbsp;&micro;s</td></tr>
-        <tr><td>Whole page</td><td>4096</td><td>1126&nbsp;&micro;s</td></tr>
+        <tr><td>A page header, through <code>nandlog_chip_read_page_region()</code></td><td>32</td><td>279&nbsp;&micro;s</td></tr>
+        <tr><td>A whole page</td><td>4,096</td><td>972&nbsp;&micro;s</td></tr>
+        <tr><td>A raw read for a blank check: page and spare, ECC off</td><td>4,352</td><td>1,030&nbsp;&micro;s</td></tr>
+        <tr><td>Clocking bytes out of the part's cache register, no latch</td><td>32 / 4,096</td><td>36 / 729&nbsp;&micro;s</td></tr>
+        <tr><td>One status read</td><td>1</td><td>32&nbsp;&micro;s</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>Fitting those two points gives <strong>0.17&nbsp;&micro;s per byte</strong> &mdash; 98.2&nbsp;% of
-       48&nbsp;MHz wire speed (690&nbsp;&micro;s for the 4064 bytes between the two reads, against
-       677&nbsp;&micro;s on the wire), so bulk transfer is efficient &mdash; and <strong>431&nbsp;&micro;s of
-       fixed cost per read, independent of length</strong>.</p>
+    <figure>
+      <svg class="dia" viewBox="0 0 640 200" role="img" aria-label="A whole-page read costs 972 microseconds and a header read 279, of which 274 is fixed cost in both cases.">
+        <text x="20" y="18" class="hd">What a read costs, and what it is made of</text>
 
-    <p>That fixed cost is almost entirely the part. Isolating the page latch &mdash; the interval during
-       which the part reports itself busy after a read command &mdash; by bisection:</p>
+        <text x="20" y="54" class="mono">whole page</text>
+        <rect class="bar2" x="130" y="40" width="115" height="22"/>
+        <rect class="bar"  x="245" y="40" width="293" height="22"/>
+        <text x="187" y="56" text-anchor="middle" class="sm" style="fill:var(--d-text)">274 fixed</text>
+        <text x="391" y="56" text-anchor="middle" class="sm" style="fill:#fff">699 &micro;s of data (4096 B)</text>
+        <text x="20" y="74" class="sm">972 &micro;s</text>
+
+        <text x="20" y="114" class="mono">32-byte header</text>
+        <rect class="bar2" x="130" y="100" width="115" height="22"/>
+        <rect class="bar"  x="245" y="100" width="2"   height="22"/>
+        <text x="187" y="116" text-anchor="middle" class="sm" style="fill:var(--d-text)">274 fixed</text>
+        <text x="255" y="116" class="sm">5 &micro;s of data</text>
+        <text x="20" y="134" class="sm">279 &micro;s</text>
+
+        <line x1="130" y1="150" x2="629" y2="150"/>
+        <text x="130" y="166" class="sm">0</text>
+        <text x="340" y="166" text-anchor="middle" class="sm">500</text>
+        <text x="550" y="166" text-anchor="middle" class="sm">1000</text>
+        <text x="629" y="166" text-anchor="end" class="sm">&micro;s</text>
+
+        <text x="130" y="190" class="sm" style="fill:var(--d-accent)">Reading 128&times; fewer bytes takes 3.5&times; less time, not 128&times;: the fixed cost dominates.</text>
+      </svg>
+      <figcaption><b>Figure 1.</b> Measured on the Apollo4 Plus at 48&nbsp;MHz SPI. Fitting the two points gives
+        0.171&nbsp;&micro;s a byte, 97.7&nbsp;% of wire speed, and 274&nbsp;&micro;s of fixed cost per read.</figcaption>
+    </figure>
+
+    <p>A header read is therefore 98&nbsp;% fixed cost, and most of that is the part's page latch. Polled from the
+       end of the read command, a latch takes a median 261&nbsp;&micro;s with ECC on, written or erased page alike, and
+       163&nbsp;&micro;s with ECC off. It also varies with the order of reads, from 212 to 436&nbsp;&micro;s across the
+       bench's access patterns. Each <code>nandlog_port_transfer_*()</code> call costs 28&ndash;32&nbsp;&micro;s on this
+       port, even for one byte.</p>
+
+    <div class="warn">
+      <p><strong>Budget from measurement.</strong> The latch and the port's overhead differ from board to board, so
+         run the benchmark on yours before sizing anything around read latency (see
+         <a href="testing.html#hardware">Testing</a>). It erases the metadata ring and the whole log region.</p>
+    </div>
+
+    <h2 id="download">Download cost</h2>
+
+    <p>A download costs one read for each page it touches, so its time follows from the read costs above. Measured on
+       the bench:</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Condition</th><th>Latch</th></tr></thead>
+      <thead><tr><th>Call</th><th>Measured</th></tr></thead>
       <tbody>
-        <tr><td>On-die ECC enabled, written page</td><td>361&nbsp;&micro;s</td></tr>
-        <tr><td>On-die ECC enabled, erased page</td><td>361&nbsp;&micro;s</td></tr>
-        <tr><td>On-die ECC disabled</td><td>244&nbsp;&micro;s</td></tr>
-        <tr><td><em>Datasheet maximum for a 4&nbsp;KB page</em></td><td><em>140&nbsp;&micro;s</em></td></tr>
+        <tr><td><code>begin_reading(0, 0)</code></td><td>7.9&nbsp;&micro;s, no flash reads</td></tr>
+        <tr><td><code>begin_reading(0, t)</code>, end bound</td><td>300&nbsp;&micro;s per page of the epoch: 300&nbsp;ms for 1,000 pages, 2.99&nbsp;s for 10,000</td></tr>
+        <tr><td><code>begin_reading(t, 0)</code>, start bound mid-epoch</td><td>300&nbsp;&micro;s per page up to the bound: 150&nbsp;ms for 501 pages</td></tr>
+        <tr><td><code>read_span(&amp;pages, &amp;bytes)</code></td><td>1.03&nbsp;ms per page: 1.03&nbsp;s for 1,000 pages</td></tr>
+        <tr><td><code>retrieve_next_page()</code></td><td>1.11&nbsp;ms per page, about 3.6&nbsp;MB/s of payload</td></tr>
+        <tr><td><code>retrieve_page_by_seq()</code></td><td>1.26&nbsp;ms</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p><strong>The latch is 83&nbsp;% of a header read</strong>, and on-die ECC accounts for 117&nbsp;&micro;s
-       of it &mdash; a fixed cost, identical on an erased page as on a written one, so it is the engine
-       running rather than correction effort. The remaining 104&nbsp;&micro;s above the datasheet's stated
-       maximum is unexplained; the figure appears to exclude the ECC engine, and this part is a 1.8&nbsp;V
-       variant while the datasheet quotes one read time for the family. The latch figures come from bisection,
-       so each is a lower bound.</p>
-
-    <p>Each <code>nandlog_port_transfer_*</code> call adds about 30&nbsp;&micro;s of host-side overhead
-       independent of payload, and a status-register read costs the same. The library keeps those calls to a
-       minimum &mdash; the status word that ends a busy wait already carries the ECC verdict, so a page read
-       asks the part for its status once rather than three times &mdash; but the latch is not something
-       software can shorten.</p>
-
-    <div class="warn">
-      <p><strong>Budget from measurement, not from the datasheet.</strong> The latch alone is 2.6 times the
-         stated 140&nbsp;&micro;s on this part, and a header read budgeted from that figure plus the host's own
-         overhead &mdash; about 215&nbsp;&micro;s &mdash; would be short by a factor of two.
-         <code>tests/</code> contains the test that produces the table above; run it on your own part before
-         sizing anything around read latency.</p>
-    </div>
-
-    <div class="warn">
-      <p><strong>A header read is 99&nbsp;% fixed overhead.</strong> Reading 32 bytes instead of 4096
-         therefore costs 39&nbsp;% of a whole-page read, not 0.8&nbsp;%. Over a full epoch of this part
-         &mdash; 260,608 pages &mdash; a bounded download open takes 114&nbsp;s rather than 293&nbsp;s: a
-         real <strong>2.6&times;</strong>, not the 128&times; the byte counts alone would suggest.</p>
-      <p>On a platform with lower per-transaction overhead, or a faster bus, the ratio moves toward the byte
-         counts. Measure it on yours before designing around either figure.</p>
-    </div>
-
-    <h3>Reducing download cost</h3>
+    <p>At those rates, a full epoch on this part (about 260,000 pages) takes about 78&nbsp;s to resolve an end bound,
+       another 267&nbsp;s for a byte total, and 289&nbsp;s to download. To keep a download short:</p>
 
     <ul>
-      <li><strong>Pass <code>NULL</code> for the byte total</strong> unless a host needs it to size a buffer. That removes a whole-page read of every page in the span.</li>
-      <li><strong>Leave the end bound at zero</strong> and filter on the host. The end-bound seek is a full pass over the epoch, every time.</li>
-      <li>A start bound alone costs only as far as the page it finds.</li>
+      <li><strong>Pass <code>NULL</code> for the byte total</strong> unless a host needs it to size a buffer. That saves
+          a whole-page read of every page in the span.</li>
+      <li><strong>Leave the end bound at zero</strong> and filter on the host, because the end-bound seek is a full
+          pass over the epoch, every time.</li>
+      <li><strong>Use a start bound alone</strong> where you can, since it reads only as far as the page it finds.</li>
     </ul>
 
-    <h2>Relocation</h2>
+    <p>To keep logging during a long download, close the read and fetch pages by sequence number instead (see
+       <a href="api.html#long-download">API Reference</a>).</p>
 
-    <figure>
-      <svg class="dia" viewBox="0 0 640 150" role="img" aria-label="Relocating a page costs 1214 microseconds inside the chip against 2747 microseconds via a read and a write.">
-        <text x="20" y="18" class="hd">Relocating one page</text>
+    <h2 id="relocation">Relocation</h2>
 
-        <text x="20" y="50" class="mono">internal copy</text>
-        <rect class="bar" x="170" y="36" width="207" height="22"/>
-        <text x="385" y="52" class="sm">1149 &micro;s</text>
-
-        <text x="20" y="90" class="mono">read + write back</text>
-        <rect class="bar2" x="170" y="76" width="207" height="22"/>
-        <rect class="bar2" x="377" y="76" width="266" height="22" style="opacity:.45"/>
-        <text x="510" y="92" text-anchor="middle" class="sm" style="fill:var(--d-text)">+1477 &micro;s on the bus</text>
-
-        <line x1="170" y1="112" x2="629" y2="112"/>
-        <text x="170" y="128" class="sm">0</text>
-        <text x="350" y="128" text-anchor="middle" class="sm">1000</text>
-        <text x="530" y="128" text-anchor="middle" class="sm">2000</text>
-        <text x="629" y="128" text-anchor="end" class="sm">&micro;s</text>
-      </svg>
-      <figcaption><b>Figure 2.</b> The 1477&nbsp;&micro;s saved is the 1390&nbsp;&micro;s that 4096 bytes in
-        each direction cost on the bus at the measured rate, and about 90&nbsp;&micro;s more, which is the host's
-        overhead for the transfers the copy does away with: 56&nbsp;% of relocating a page through RAM.</figcaption>
-    </figure>
-
-    <p>Measured on hardware, per page:</p>
+    <p>When a block fails, the log moves the epoch's pages in it to the next good block, inside the part when the
+       driver supports it (<code>NANDLOG_CHIP_PAGE_COPY</code>). Measured on the bench, per page:</p>
 
     <div class="tablewrap">
     <table>
       <thead><tr><th>Method</th><th>Per page</th><th>Per 64-page block</th></tr></thead>
       <tbody>
-        <tr><td>Chip-internal copy</td><td>1149&nbsp;&micro;s</td><td>73&nbsp;ms</td></tr>
-        <tr><td>Read into RAM and write back</td><td>2626&nbsp;&micro;s</td><td>168&nbsp;ms</td></tr>
-        <tr><td><strong>Saving</strong></td><td><strong>1477&nbsp;&micro;s (56&nbsp;%)</strong></td><td><strong>95&nbsp;ms</strong></td></tr>
+        <tr><td>Internal copy</td><td>1,239&nbsp;&micro;s</td><td>79&nbsp;ms</td></tr>
+        <tr><td>Read into RAM and write back</td><td>2,676&nbsp;&micro;s</td><td>171&nbsp;ms</td></tr>
+        <tr><td><strong>Saving</strong></td><td><strong>1,437&nbsp;&micro;s (54&nbsp;%)</strong></td><td><strong>92&nbsp;ms</strong></td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>The saving of 1477&nbsp;&micro;s is the 1390&nbsp;&micro;s of bus time that 4096 bytes in each
-       direction cost at the measured rate, which is what the optimisation was for, plus about 90&nbsp;&micro;s
-       of host overhead for the READ and PROGRAM DATA LOAD transfers, and the status read, that the copy does
-       away with.</p>
+    <figure>
+      <svg class="dia" viewBox="0 0 640 150" role="img" aria-label="Relocating a page costs 1239 microseconds inside the chip against 2676 microseconds via a read and a write.">
+        <text x="20" y="18" class="hd">Relocating one page</text>
 
-    <p>Those are the primitives, measured on their own. The log reads each page it moves whole before it moves
-       it, whichever way it moves it, so that the decision to copy a page is made from one read of it; per page
-       that adds a whole-page read, 1126&nbsp;&micro;s, to both rows, and the internal copy's saving is the write
-       and the read-back it does away with. In simulator bus-traffic terms, retiring one block and relocating the
-       twenty pages already written in it:</p>
+        <text x="20" y="50" class="mono">internal copy</text>
+        <rect class="bar" x="170" y="36" width="186" height="22"/>
+        <text x="364" y="52" class="sm">1,239 &micro;s</text>
 
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Setting</th><th>Bus traffic</th></tr></thead>
-      <tbody>
-        <tr><td><code>NANDLOG_CHIP_PAGE_COPY = 1</code> (internal copy)</td><td>142,673 bytes</td></tr>
-        <tr><td><code>NANDLOG_CHIP_PAGE_COPY = 0</code> (read and write)</td><td>286,393 bytes</td></tr>
-      </tbody>
-    </table>
-    </div>
+        <text x="20" y="90" class="mono">read + write back</text>
+        <rect class="bar2" x="170" y="76" width="186" height="22"/>
+        <rect class="bar2" x="356" y="76" width="216" height="22" style="opacity:.45"/>
+        <text x="464" y="92" text-anchor="middle" class="sm" style="fill:var(--d-text)">+1,437 &micro;s on the bus</text>
 
-    <p>The first row is mostly each moved page's one whole read; the rest is its copy's header read back, the
-       one program attempt the block refused before it was retired, the metadata slot pair that records the
-       refusal, the bad-block table's pair, and the page that actually had to be written and verified. The copy
-       itself moves six bytes of address per page. The second row reads each page, writes it, and reads it back
-       to check it.</p>
+        <line x1="170" y1="112" x2="629" y2="112"/>
+        <text x="170" y="128" class="sm">0</text>
+        <text x="320" y="128" text-anchor="middle" class="sm">1000</text>
+        <text x="470" y="128" text-anchor="middle" class="sm">2000</text>
+        <text x="620" y="128" text-anchor="middle" class="sm">3000</text>
+      </svg>
+      <figcaption><b>Figure 2.</b> The 1,437&nbsp;&micro;s saved is almost all bus time: 4,096 bytes in each direction
+        cost 1,398&nbsp;&micro;s at the measured rate.</figcaption>
+    </figure>
+
+    <p>These are the primitives alone. The log also reads each page whole before it moves it, either way, so that the
+       decision to copy is made from a single read, and then reads back the copy's header. In the simulator, a commit
+       that relocates 40 pages and retires the block reads 193,152 bytes and writes 37,775 with the internal copy,
+       against 355,712 and 201,495 without it. The worst case the placement bound allows reads 559,643 bytes and writes
+       55,663 with it, against 1,063,579 and 571,381 without. The 40-page relocation's 49 programs are the 40 copies,
+       the failed page and its retry, two slot pairs (one recording the failure, one the retirement), a table version
+       (a pair), and the retired block's mark.</p>
 
     <h2 id="boot">Boot</h2>
 
-    <p>From the simulator counts above and the read costs measured on this part &mdash; 436&nbsp;&micro;s for a
-       header read, 1126&nbsp;&micro;s for a whole page, and, as an estimate not yet measured, about
-       1.2&nbsp;ms for a raw read, which adds two register writes to a whole-page read &mdash; plus the
-       measured 973&nbsp;&micro;s per erase:</p>
+    <p>A warm boot on the bench takes 82&ndash;89&nbsp;ms. Each row is the median of 20 boots, and the 20 agree to
+       within 0.1&nbsp;ms.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Event</th><th>Work</th><th>Modelled</th></tr></thead>
+      <thead><tr><th>Boot</th><th>Reads (raw)</th><th>Erases</th><th>Time</th></tr></thead>
       <tbody>
-        <tr><td>Warm boot, one epoch</td><td>45 short reads, 11 table-page reads of about 1&nbsp;kB and 3 whole-page reads with ECC on, 16 raw reads, 8 one-byte marker reads with ECC off (counted as header reads), 2 erases</td><td>about 54&nbsp;ms</td></tr>
-        <tr><td>Warm boot, populated ring</td><td>46 short, 11 table-page and 3 whole-page reads, 21 raw reads, 8 marker reads, 2 erases</td><td>about 61&nbsp;ms</td></tr>
-        <tr><td>First ever boot</td><td>4103 one-byte marker reads with ECC off and 18 other reads, 1 erase, 3 programs</td><td>about 1.8&nbsp;s, measured 1.79&nbsp;s for the scan with ECC on</td></tr>
+        <tr><td>Ring empty, log region erased</td><td>71 (41)</td><td>0</td><td>47.6&nbsp;ms</td></tr>
+        <tr><td>1, 64, 511, or 600 epochs in the ring, the last empty</td><td>122&ndash;124 (59&ndash;61)</td><td>3</td><td>87.2&ndash;89.4&nbsp;ms</td></tr>
+        <tr><td>600 epochs, the last 1,000 pages long</td><td>121 (56)</td><td>2</td><td>84.5&nbsp;ms</td></tr>
+        <tr><td>600 epochs, the last 10,000 pages long</td><td>119 (54)</td><td>2</td><td>82.0&nbsp;ms</td></tr>
+        <tr><td>The driver's <code>nandlog_chip_init()</code> alone</td><td>63 (41)</td><td>0</td><td>37.8&nbsp;ms</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>These are models, not measurements: no boot of this build has been timed on hardware. A boot reads the
-       first slot of each ring block, rather than all 512 slots, and binary-searches the newest, and finds the write head in about
-       &lceil;log<sub>2</sub>(N&nbsp;+&nbsp;1)&rceil; = 18 probes: its first four are rotated, boot to boot, over the middle half of
-       what is left to search, by the ring's slot numbering and <code>NANDLOG_BOOT_SALT</code>, which costs at most
-       part of a probe each and spreads what read disturb counts. A table page is modelled as a header read plus its
-       kilobyte at the measured rate, about 606&nbsp;&micro;s. About
-       a fifth of the latches are raw reads, the price of only ever taking a blank page as evidence &mdash;
-       that a probe is past the write head, or that nothing was written after the newest table version or
-       metadata slot. The driver adds one ECC-off read per retired block, to check that its marker is there,
-       so a worn part with a hundred retired blocks pays about a hundred more short reads a boot.</p>
+    <p><strong>The bad-block table's share.</strong> Every boot reads the mark of each block the driver's table names,
+       with ECC off, to check that it still reads <code>00h</code>, so the driver's share grows with the table. The
+       bench part's table names its 35 marked blocks: the 24 retired in its ring and log region, and 11 in the reserve.
+       The bench's own scan of all 4,096 marks takes 1,400.7&nbsp;ms, or 0.34&nbsp;ms a mark, and the driver adds two
+       register writes and a status read to each, so a boot spends about 0.43&nbsp;ms per table entry. A part with the
+       80 bad blocks its datasheet allows would spend about 34&nbsp;ms a boot on its marks.</p>
 
-    <p>Every boot also erases the blocks ahead of the head again, because an erase a cut interrupted can
-       leave a block that reads erased and programs unreliably, and a boot cannot tell. A device that reboots
-       far more often than it fills a block therefore wears those blocks by up to
-       <code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases a boot, plus one while the head sits on a block boundary:
-       one boot a minute while logging a page an hour keeps each block in the default two-block window for 128
-       hours, so it is erased about 7,700 times on each pass of the head &mdash; a large share of any part's
-       rated endurance. Setting
-       <code>NANDLOG_ERASE_AHEAD_BLOCKS</code> to 0 leaves a boot only the head's own block to erase, at the
-       price of the commit that enters each block erasing it first.</p>
+    <p><strong>A first boot</strong> reads the mark of every block. It has not been timed on hardware. The bench's
+       scan of the same 4,096 marks takes 1.40&nbsp;s, so a model that adds the driver's status read per block gives
+       about 1.5&nbsp;s. A boot that rebuilds a lost table, and every boot in degraded mode, reads the same marks.</p>
 
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Measured on hardware</th><th>Figure</th></tr></thead>
-      <tbody>
-        <tr><td>Full-array bad-block scan (4096 blocks)</td><td>1.79&nbsp;s</td></tr>
-        <tr><td>A boot that rebuilds the table from the marks, the reserve dead (bench, 2026-10-27)</td><td>1.80&ndash;1.85&nbsp;s</td></tr>
-        <tr><td>Retired blocks on a sample part, via <code>nandlog_bad_block_count()</code></td><td>7 of 4096 (0.17&nbsp;%)</td></tr>
-      </tbody>
-    </table>
-    </div>
+    <p><strong>Wear from the window.</strong> Every boot erases the blocks ahead of the head again, because an
+       interrupted erase can leave a block that reads erased but programs unreliably. A device that reboots far more
+       often than it fills a block wears those blocks by up to <code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases a boot.
+       For example, one boot a minute while logging a page an hour keeps each block in the default two-block window for
+       128 hours, so it is erased about 7,700 times on each pass of the head. Setting the window to 0 avoids this, at
+       the price of a commit that erases each block it enters (see
+       <a href="getting-started.html#configure">Getting Started</a>).</p>
 
     <h2 id="crc">CRC-32</h2>
 
-    <p>Every page carries a CRC-32 over its 28-byte header and one over its payload, and every page read is checked
-       against both. Where that work lands:</p>
+    <p>Every page carries a CRC-32 over its 28-byte header and one over its payload, and every page read checks both.
+       Each is computed in software unless the port takes it over with <code>NANDLOG_PORT_CRC32</code> (see
+       <a href="porting.html#crc">Porting</a>). Measured on the bench:</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>CRC</th><th>4,064-byte payload</th><th>28-byte header</th></tr></thead>
+      <tbody>
+        <tr><td>Software, table in RAM (the default)</td><td>466.6&nbsp;&micro;s, 11.0 cycles a byte</td><td>4.1&nbsp;&micro;s</td></tr>
+        <tr><td>A byte-at-a-time reference with its table in flash</td><td>881.0&nbsp;&micro;s, 20.8 cycles a byte</td><td>7.0&nbsp;&micro;s</td></tr>
+        <tr><td>The port's hook on the Apollo4's CRC engine</td><td>49.8&nbsp;&micro;s, 1.2 cycles a byte</td><td>5.3&nbsp;&micro;s</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>The engine is slower than software on a header, so the bench's port uses it only for runs of 64 bytes or more,
+       as <code>nandlog_port.c</code> sketches. The bench build uses the engine, so the call timings on this page
+       include it. <code>NANDLOG_CRC_SLICE_BY_4</code> has not been measured on this board. The work lands here:</p>
 
     <ul>
-      <li><strong><code>nandlog_store_record()</code></strong> adds its own record to the page's CRC as it copies the
-          record in: the record's length plus 5 bytes, and 2 more with framing.</li>
-      <li><strong>A commit</strong> computes only the header's CRC: the payload's is already kept. A page tried again
-          after a failed program, in another block, keeps it too.</li>
-      <li><strong>A page served</strong> &mdash; <code>nandlog_retrieve_next_page()</code>, by sequence number, from
-          the retransmission list or <code>nandlog_read_recent_page()</code> &mdash; costs one payload CRC, the check,
-          and reports the CRC it checked. <code>nandlog_read_span()</code>'s byte total costs one a page as well.</li>
-      <li>Boot and the time-bound seek check one 28-byte header CRC per header read; a relocation, one payload CRC per
-          page it moves through the part, two more for one it moves across the bus.</li>
+      <li><code>nandlog_store_record()</code> adds its record to the page's CRC as it copies it in, so a commit
+          computes only the header's CRC.</li>
+      <li>Each page served, and each page <code>nandlog_read_span()</code> totals, costs one payload CRC.</li>
+      <li>Boot and the time-bound seek check one header CRC per header read.</li>
     </ul>
 
-    <p>Each is the library's software unless the port takes the CRC over (<code>NANDLOG_PORT_CRC32</code>, see
-       <a href="porting.html#crc">Porting</a>). Measured and modelled on the Apollo4 Plus at 96&nbsp;MHz,
-       <code>-Ofast</code>, the buffers in zero-wait TCM:</p>
+    <h2 id="blocking">Blocking time</h2>
+
+    <p>A call blocks its caller for its flash operations, so the longest calls are a commit and an erase. The same
+       bench run stores 1,280 pages each of 32-, 256-, and 1,024-byte records:</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>CRC</th><th>4,064-byte payload</th><th>28-byte header</th><th>Basis</th></tr></thead>
+      <thead><tr><th>Call</th><th>Median</th><th>Longest</th></tr></thead>
       <tbody>
-        <tr><td>Software, a byte a step, table in flash (<code>NANDLOG_CRC_TABLE_IN_RAM</code> 0)</td><td>883&nbsp;&micro;s (20.8 cycles a byte)</td><td>7.3&nbsp;&micro;s</td><td>measured, bench, 2026-10-27, table in MRAM</td></tr>
-        <tr><td>Software, a byte a step, table in RAM (the default)</td><td>about 420&ndash;470&nbsp;&micro;s (10&ndash;11 cycles a byte)</td><td>about 3&nbsp;&micro;s</td><td>modelled: the loop's seven instructions at Cortex-M4 timings, no wait states</td></tr>
-        <tr><td>Software, four bytes a step (<code>NANDLOG_CRC_SLICE_BY_4</code> 1), tables in RAM</td><td>about 225&nbsp;&micro;s (5.3 cycles a byte)</td><td>about 3&nbsp;&micro;s</td><td>modelled likewise: 18 instructions per word</td></tr>
-        <tr><td>Port hook on the Apollo4's security engine</td><td>to be measured</td><td>software: runs under 64 bytes</td><td>the bench's <code>crc.hook.*</code> lines</td></tr>
+        <tr><td><code>store_record()</code> that only buffers: 32-, 256-, 1,024-byte records</td><td>16.8, 27.4, 50.2&nbsp;&micro;s</td><td>17.2, 27.8, 51.2&nbsp;&micro;s</td></tr>
+        <tr><td><code>store_record()</code> that commits a full page</td><td>2,790&ndash;2,974&nbsp;&micro;s</td><td>2,978&nbsp;&micro;s</td></tr>
+        <tr><td><code>store_record()</code> that carries an erase-ahead</td><td>988&ndash;1,022&nbsp;&micro;s</td><td>3,017&nbsp;&micro;s</td></tr>
+        <tr><td><code>flush(true)</code> of a 156-byte partial page</td><td>2,086&nbsp;&micro;s</td><td>2,091&nbsp;&micro;s</td></tr>
+        <tr><td><code>flush(false)</code> with nothing due</td><td>4.3&nbsp;&micro;s</td><td>4.9&nbsp;&micro;s</td></tr>
+        <tr><td><code>begin_epoch()</code></td><td>8.2&nbsp;ms, or 9.9&nbsp;ms entering a ring block</td><td>10.6&nbsp;ms</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>The modelled rows are instruction counts of the compiled loops, not measurements; the bench's
-       <code>crc.payload_4064B</code>, <code>crc.hook.payload_4064B</code> and <code>crc.flash_table.payload_4064B</code>
-       lines measure all three on the board in one run. What they mean for the calls, modelled from the bench's
-       measured figures with the table in RAM:</p>
+    <p>In 3,840 commits, no call both committed a page and erased a block. A commit is mostly the part and the bus. A
+       traced commit spends 727&nbsp;&micro;s loading 4,096 bytes into the part, about 650&nbsp;&micro;s programming
+       them, and 711&nbsp;&micro;s reading back a full page's header and payload, so a partial page commits faster. The
+       erase-ahead in this run mostly met blocks the bench had already erased, at about 1&nbsp;ms each. A full block takes 3,538&nbsp;&micro;s to
+       erase, so an erase-ahead over old data takes about that long. A commit erases the block it enters only when no
+       call that commits nothing has run for the 128 pages the default window covers.</p>
 
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Call</th><th>Measured: the payload CRC in the commit, table in flash</th><th>Modelled</th></tr></thead>
-      <tbody>
-        <tr><td><code>store_record()</code> that commits a page, 32-byte records</td><td>3,949&nbsp;&micro;s median</td><td>about 3,070&nbsp;&micro;s</td></tr>
-        <tr><td>The longest single <code>store_record()</code></td><td>4,015&nbsp;&micro;s</td><td>about 3,140&nbsp;&micro;s</td></tr>
-        <tr><td><code>store_record()</code> that only buffers: 32, 256, 1,024-byte records</td><td>10.3, 14.6, 29.3&nbsp;&micro;s</td><td>about 14, 42, 137&nbsp;&micro;s</td></tr>
-        <tr><td><code>retrieve_next_page()</code>, a full page</td><td>2,782&nbsp;&micro;s</td><td>about 1,440&nbsp;&micro;s; 1,240 with slicing</td></tr>
-        <tr><td><code>retrieve_page_by_seq()</code></td><td>2,081&nbsp;&micro;s</td><td>about 1,620&nbsp;&micro;s</td></tr>
-      </tbody>
-    </table>
-    </div>
+    <h2 id="loops">Bounded loops</h2>
 
-    <p>The CRC of a page's payload is the same work wherever it is done; kept up record by record it is spread over
-       the calls that store, so no call carries it in one piece, and with the table in RAM there is about half as
-       much of it. A port whose engine takes long runs moves the records of 64 bytes or more, and every page served,
-       to the hardware as well.</p>
-
-    <h2>Blocking time</h2>
-
-    <p>Measured on an Ambiq Apollo4 Plus (Cortex-M4F) with the Alliance part on a 48&nbsp;MHz SPI bus, over
-       roughly 488 page writes and 12 erase-ahead activations, using the DWT cycle counter, in the firmware
-       this library was extracted from &mdash; the same program-then-read-back commit, without the library's
-       software CRCs and with two erases per activation.</p>
-
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Operation</th><th>Max observed</th><th>Frequency</th><th>Amortized per page</th></tr></thead>
-      <tbody>
-        <tr><td>One page commit</td><td>2855 &ndash; 2893 &micro;s</td><td>every page</td><td>2893 &micro;s</td></tr>
-        <tr><td>Erase-ahead (2 blocks)</td><td>1946 &ndash; 1989 &micro;s</td><td>every 64 pages</td><td><strong>30 &micro;s</strong></td></tr>
-      </tbody>
-    </table>
-    </div>
-
-    <p>In this library an activation is one erase of about 973&nbsp;&micro;s, not two, and it runs in a call that
-       commits no page, so the longest a nominal call blocks is one page commit. Only when the window has
-       run dry &mdash; no idle call for 128 pages at the default window &mdash; does a commit erase the block it
-       is entering itself. A commit computes only its header's CRC, the payload's having been kept up as the records
-       were stored (<a href="#crc">above</a>), and its read-back clocks out only the header and payload, so a partial
-       page reads back in little more than a header read.</p>
-
-    <h3>Bounded loops</h3>
-
-    <p>These loops run in whichever task calls the log, so every one has a stated bound. A part that has
-       stopped accepting programs must not turn a search into a spin that only a watchdog can end.</p>
+    <p>These loops run in whichever task calls the log, so every one has a stated bound. A part that has stopped
+       accepting programs cannot turn a search into a spin that only a watchdog can end.</p>
 
     <div class="tablewrap">
     <table>
@@ -443,81 +390,51 @@
       <tbody>
         <tr><td>Walking to the next good block</td><td>One pass over the log region's blocks, in RAM</td></tr>
         <tr><td>Placing a page that will not stay written</td><td><code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> blocks in all, then <code>nandlog_port_unwritable()</code></td></tr>
-        <tr><td>Waiting for the part to clear BUSY</td><td><code>NANDLOG_BUSY_TIMEOUT_POLLS</code> status polls, <code>NANDLOG_BUSY_POLL_INTERVAL_US</code> apart (at least 0.5&nbsp;s, about 2.1&nbsp;s on the Apollo4 port), then <code>nandlog_port_fatal()</code></td></tr>
+        <tr><td>Waiting for the part to clear BUSY</td><td><code>NANDLOG_BUSY_TIMEOUT_POLLS</code> status polls, <code>NANDLOG_BUSY_POLL_INTERVAL_US</code> apart, then <code>nandlog_port_fatal()</code>. That is at least 0.5&nbsp;s at the defaults, and about 2.4&nbsp;s on the Apollo4 Plus port, where a poll takes about 47&nbsp;&micro;s</td></tr>
         <tr><td>Programming one page</td><td>One PROGRAM EXECUTE, never repeated</td></tr>
-        <tr><td>Erasing one block</td><td><code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code> attempts before it is retired</td></tr>
+        <tr><td>Erasing one block</td><td><code>NANDLOG_BLOCK_ERRORS_BEFORE_REMOVAL</code> attempts before the block is retired</td></tr>
         <tr><td>Writing a metadata slot</td><td>Two passes over the ring's blocks, a pair of pages in each</td></tr>
-        <tr><td>Writing the Alliance driver's table</td><td>One pass over its eight table blocks, a pair of pages in each</td></tr>
-        <tr><td>Carrying on with epochs the ring lost the slots of</td><td>One head search each, at most as many as the ring has slots</td></tr>
-        <tr><td>The write-head search</td><td>&lceil;log<sub>2</sub>(N&nbsp;+&nbsp;1)&rceil; probes, plus one header read per position of each run of unreadable positions below a probe, never below the search's lower bound</td></tr>
+        <tr><td>Writing the Alliance driver's table</td><td>One pass over its table blocks, a pair of pages in each</td></tr>
+        <tr><td>Carrying on with epochs whose slots the ring lost</td><td>One head search each, at most once per page of the ring</td></tr>
+        <tr><td>The write-head search</td><td>&lceil;log<sub>2</sub>(N&nbsp;+&nbsp;1)&rceil; probes and at most three more, plus one header read per position of each run of unreadable positions below a probe, never below the search's lower bound</td></tr>
       </tbody>
     </table>
     </div>
 
-    <h2>Memory</h2>
+    <h2 id="memory">Memory</h2>
 
-    <p>All static, all sized at compile time, nothing allocated. Measured with
-       <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> at 4096, compiled by GCC 15.2 for the Cortex-M4F at
-       <code>-O2</code>; each object as compiled, its code being its <code>.text</code> and
-       <code>.rodata</code> (the footprint script, <code>sim/baselines/footprint/build.sh</code>).</p>
+    <p>All memory is static and sized at compile time, and nothing is allocated. These figures are for
+       <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> at 4096, compiled by GCC 15.2 for the Cortex-M4F at <code>-O2</code>.
+       Code is each object's <code>.text</code> and <code>.rodata</code>, as
+       <code>sim/baselines/footprint/build.sh</code> measures it.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Object</th><th>RAM</th><th>Code</th><th>Composition</th></tr></thead>
+      <thead><tr><th>Object</th><th>RAM (bytes)</th><th>Code (bytes)</th></tr></thead>
       <tbody>
-        <tr><td><code>nandlog.c</code></td><td>10,972</td><td>21,905</td><td>2 &times; <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> + 4 &times; <code>NANDLOG_MAX_RETRANSMIT_PAGES</code> + 4 &times; <code>NANDLOG_MAX_TRACKED_RETIRED_BLOCKS</code> + the CRC's 1,024-byte table (<code>NANDLOG_CRC_TABLE_IN_RAM</code>; 4,096 with <code>NANDLOG_CRC_SLICE_BY_4</code>; none in RAM, and 1,024 more of code, with the table in flash) + about 250 bytes of state</td></tr>
-        <tr><td><code>nandlog_chip_AS5F18G04SND.c</code></td><td>5,449</td><td>9,202</td><td>One page-with-spare scratch buffer, a 256-entry bad-block table</td></tr>
-        <tr><td><code>nandlog_chip_W25N01GWZEIG.c</code></td><td>2,193</td><td>2,246</td><td>One page-with-spare scratch buffer, a 20-entry LUT mirror</td></tr>
+        <tr><td><code>nandlog.c</code></td><td>10,972</td><td>21,905</td></tr>
+        <tr><td><code>nandlog_chip_AS5F18G04SND.c</code></td><td>5,449</td><td>9,202</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>About <strong>16.4&nbsp;kB</strong> of RAM for the Alliance part, 15.4&nbsp;kB with the CRC's table left in flash. The dominant term is the page budget, so a
-       build that lowers <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> to match a 2&nbsp;KB-page part saves about
-       4&nbsp;kB. The passed-over list costs no RAM: a boot reads a slot, list and all, into the page buffer, which holds no records until
-       the boot is over.</p>
+    <p>That is about <strong>16.4&nbsp;KB</strong> of RAM for the Alliance part. The library's share is two page
+       buffers (2 &times; <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code>), 4 bytes per entry of the retransmission list (256
+       entries) and the retired-block list (128), the CRC's 1,024-byte table, and about 220 bytes of state. Leaving the
+       CRC table in flash (<code>NANDLOG_CRC_TABLE_IN_RAM</code> 0) saves 1,024 bytes, and
+       <code>NANDLOG_CRC_SLICE_BY_4</code> makes the table 4,096. The Alliance driver holds a page-and-spare scratch
+       buffer and a 256-entry table. The Winbond driver holds a 2,112-byte scratch buffer and an 80-byte mirror of the
+       part's remap table. Matching <code>NANDLOG_MAX_PAGE_SIZE_BYTES</code> to a 2&nbsp;KB-page part saves
+       4&nbsp;KB.</p>
 
-    <p>The only meaningful stack use is in the epoch-listing calls, which build a short array on the stack
-       (128 bytes at the default <code>NANDLOG_MAX_LISTED_EPOCHS</code> of 16) rather than caching a list of
-       epochs in RAM between calls, and a few 64-byte slot heads held while a page is verified. The deepest
-       frame, <code>nandlog_select_epoch()</code>, is 344 bytes at <code>-O2</code>; the deepest chain, by GCC's
-       call graph, is 764 bytes with the Alliance driver and 620 with the Winbond one, from
-       <code>nandlog_init()</code> to the port's transfer (a stub's, of 4 bytes): a boot relocating the head's
-       block to a target that will not erase, whose retirement's slot then meets a ring block that will not erase
-       either, and retires that too. <code>nandlog_store_record()</code>'s deepest is 684 bytes (540 with the
-       Winbond driver), plus the port's CRC where <code>NANDLOG_PORT_CRC32</code> is set. There is no
-       recursion.</p>
+    <p>The deepest stack frame is <code>nandlog_select_epoch()</code>'s, at 344 bytes, because the epoch-listing calls
+       build a short array on the stack rather than keep a list of epochs in RAM. By GCC's call graph, the deepest chain
+       with the Alliance driver is 764 bytes, from <code>nandlog_init()</code> to the port's transfer: a boot that
+       relocates the head's block and retires a block, recording it in the ring and in the table.
+       <code>nandlog_store_record()</code>'s deepest chain is 684 bytes, plus the port's CRC where
+       <code>NANDLOG_PORT_CRC32</code> is set. There is no recursion.</p>
 
-    <h2>Failure handling</h2>
-
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Failure</th><th>Response</th></tr></thead>
-      <tbody>
-        <tr><td>Program reports failure</td><td>Never repeated, not even after a reboot: the metadata ring records the failed page first. The pages already in the block are moved to the next good block and verified, the block is retired persistently, and the page goes to the same offset there. With nowhere to move them, at the wrap, the region is full; with no block that will take them, logging stops; either way the next boot moves them before it programs anything</td></tr>
-        <tr><td>Written page does not read back byte for byte, or only at the ECC limit</td><td>Same</td></tr>
-        <tr><td>Relocation target refuses its erase or a copy</td><td>It is retired too, and the next good block is tried, within <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code></td></tr>
-        <tr><td>A page to relocate cannot be read</td><td>It goes over as a tombstone carrying its sequence number</td></tr>
-        <tr><td>Erase reports failure</td><td>Retried, then the block is retired; the window or the epoch's start moves on to the next good block</td></tr>
-        <tr><td>Power lost mid-program</td><td>The next boot passes over the torn page, never programs it again, and serves it as a gap</td></tr>
-        <tr><td>Power lost mid-erase</td><td>The boot erases the window ahead of the head again; a head that lands part-way into a block holding nothing of the epoch below it goes back to the block's start, or, when what is there may be the epoch's own torn pages, the block is erased again and each of them gets a tombstone &mdash; again at the next boot, if a cut stopped that erase</td></tr>
-        <tr><td>Power lost mid-relocation or mid-table-update</td><td>The old state stands until the new one is complete on the part</td></tr>
-        <tr><td>Power lost mid-metadata-write</td><td>The boot writes the slot or table version it went by again, before anything else, so every later boot goes by the same one; a cut between a table version and its spare-area marks is made good by the next boot</td></tr>
-        <tr><td>One page of the metadata ring or the bad-block table unreadable</td><td>Nothing changes: each slot and each table version is on two pages</td></tr>
-        <tr><td>A copy of the newest slot or table version read only at the ECC limit</td><td>The boot goes by it, and writes the slot or version again, unchanged, into a fresh block (one erase, two programs); nothing else changes</td></tr>
-        <tr><td>The newest slot's passed-over list unreadable in both copies, the list nearly full, or the table laying the epoch out differently from the ring's record</td><td>The epoch is sealed, in its slot: <code>NANDLOG_ERR_SEALED</code> and <code>nandlog_port_unwritable()</code> at every boot until a new epoch; reads go on</td></tr>
-        <tr><td>Payload CRC mismatch on read</td><td>That page is reported as zero-length: a gap, not the end of the log</td></tr>
-        <tr><td>The region fills</td><td>Records are refused with <code>NANDLOG_ERR_FULL</code> until a new epoch begins; nothing of the epoch is erased</td></tr>
-        <tr><td>A page will not stay written anywhere</td><td>Logging stops, <code>NANDLOG_ERR_UNWRITABLE</code>, and <code>nandlog_port_unwritable()</code> is called; nothing more is programmed until a reboot or a new epoch</td></tr>
-        <tr><td>Part stops responding</td><td>Bounded busy-wait, then <code>nandlog_port_fatal()</code>, which must not return</td></tr>
-        <tr><td>Bad-block table holds more entries than the datasheet's 80 bad blocks</td><td>Reported and kept</td></tr>
-        <tr><td>Every copy of the bad-block table lost</td><td>Rebuilt from the factory marks and the marks the driver writes into retired blocks, read with ECC off; if the rebuilt table lays the epoch out differently, the epoch is sealed</td></tr>
-        <tr><td>The reserve cannot hold the table (Alliance)</td><td>A boot gives the driver an aligned pair of blocks from the top of the log region, outside the epoch and holding nothing a read could serve; the table moves there and the pair is retired. Warm boots then read one header a block down to 48 blocks below the reserve: about 200 latches instead of 83, against about 4,300 for a rebuild</td></tr>
-        <tr><td>No pair to be had either (Alliance)</td><td>Degraded mode: a retirement is committed by its block's mark, read back exactly <code>00h</code>; every boot rebuilds the table from the marks and programs each once more. Logging goes on. A block that will not take even its mark gets the table a pair in the same call (about 400 latches, 85 programs, 6 erases on the board's shape, ≈ 0.25&nbsp;s; bounded by one debris pass and three pairs tried); with no pair anywhere the log stops, as before</td></tr>
-      </tbody>
-    </table>
+    <div class="note">
+      <p>What the log does when the part fails, case by case, is on the Durability page, in
+         <a href="durability.html#failures">Failure handling</a>.</p>
     </div>
-
-    <p>The consistent rule: <strong>a page that cannot be trusted is a gap, and a gap is not the end of the
-       log.</strong> Reads step over it; offload reports it as a zero-length page carrying its sequence
-       number, so a host can tell "still missing" from "never answered" and ask for it again.</p>

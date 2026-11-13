@@ -11,7 +11,7 @@
 //     #define NANDLOG_CHIP_SPARE_SIZE_BYTES        256
 //     #define NANDLOG_CHIP_PAGES_PER_BLOCK         64
 //     #define NANDLOG_CHIP_BLOCK_COUNT             4096
-//     #define NANDLOG_CHIP_RESERVED_BLOCKS         80
+//     #define NANDLOG_CHIP_RESERVED_BLOCKS         16
 //     #include "nandlog_chip_common.h"
 //
 // Adding a part is therefore one new .c file and one line in the build.

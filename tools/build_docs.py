@@ -13,6 +13,7 @@ NAV = [
     ("api.html",             "API Reference"),
     ("porting.html",         "Porting"),
     ("chips.html",           "Chip Drivers"),
+    ("durability.html",      "Durability"),
     ("format.html",          "On-Flash Format"),
     ("performance.html",     "Performance"),
     ("testing.html",         "Testing"),

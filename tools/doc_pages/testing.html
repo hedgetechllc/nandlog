@@ -1,55 +1,76 @@
 <!-- title: Testing | desc: The nandlog host simulator, its campaign, fuzzer and bounded-exhaustive check, and the on-device test applications, and what each can and cannot prove. -->
-    <h1>Testing</h1>
-    <p class="lede">A host simulator for everything above the wire, and device applications for everything at it.</p>
+<h1>Testing</h1>
+    <p class="lede">How nandlog is tested, what each check can show, and how much has run on real hardware. Read it
+       if you are deciding whether to trust the library, changing it, or bringing up a board.</p>
 
-    <h2>Host simulator</h2>
+    <p>Most of nandlog's testing runs on the host. The simulator in <code>sim/</code> emulates a SPI NAND part at
+       the command level, so the unmodified core and chip driver run on it, and it can cut power or inject a fault at
+       any program or erase. Every check holds the log to its <a href="durability.html#contract">durability
+       contract</a>: once the call that commits a page returns, every record in that page survives any later power
+       cut, intact and exactly once.</p>
 
-<pre><code>cd sim &amp;&amp; make            # the suite and the regression tests, every configuration; the bad-block answers
-cd sim &amp;&amp; make campaign   # the crash-point campaign and the recovery and metadata sweeps, in four builds
-cd sim &amp;&amp; make fuzz       # random calls, faults and power cuts against an independent oracle, nine builds
-cd sim &amp;&amp; make exhaustive # every combination of page states below the write head of a toy part,
-                          # and every cut in every metadata write path, five builds
-cd sim &amp;&amp; make opcounts   # the flash operations and bus bytes of each call, and the boots of the benchmark boards' shapes
-cd sim &amp;&amp; make windows    # the regression tests with an erase-ahead window of 0 blocks, and of 1; the dead-reserve tests at 3
-cd sim &amp;&amp; make headpass   # the NANDLOG_PASS_OVER_HEAD_AT_BOOT share of the above, on its own
-cd sim &amp;&amp; make soak       # the on-device power-cut soak, built for the host: a thousand boots, cut at random
-cd sim &amp;&amp; make ablation   # each mechanism taken away in turn, and which checks notice
-cd sim &amp;&amp; make baselines  # the comparison with Dhara and littlefs, fetched at pinned commits</code></pre>
+    <p>The checks come in layers. About a hundred regression tests each target one failure mode. A crash-point
+       campaign cuts power at every operation of fourteen traces. A fuzzer and a bounded-exhaustive check reach
+       states the traces do not, and an ablation shows that the checks fail when any one recovery mechanism is
+       removed.</p>
 
-    <p><code>make</code> builds and runs five configurations &mdash; record framing off, framing on, framing on
-       with pages relocated through RAM instead of inside the chip (and room in RAM for only one retired
-       block, so the slow path runs too), the Winbond driver, and a build whose every CRC comes through the port
-       (<code>NANDLOG_PORT_CRC32</code>), where the simulator's hook continues the library's software CRC in
-       deliberately odd pieces, split differently at each call, over the four-bytes-a-step software with its tables
-       in flash &mdash; under AddressSanitizer and UndefinedBehaviorSanitizer. Each runs the suite and the
-       regression tests. Then the Alliance driver's answers to <code>nandlog_chip_is_bad_block()</code> are held
-       to a search of its table (<code>sim/nandlog_sim_badblocks.c</code>, which compiles the driver in to read
-       it): about 11 million answers on the full-size part and the campaign's small one, after factory marks,
-       retirements, reboots, table versions moved below the reserve, blocks given to the table and degraded mode,
-       each of which the run must reach. Last, the reference parser is checked against the images the suite dumped;
-       the port-CRC build's image is byte for byte the framed build's. It takes about three and a half minutes.</p>
+    <p>A simulator shows that the logic holds under every fault it models. It cannot show what a real part does:
+       its timing, its ECC, or what an interrupted operation leaves in its cells. On an Ambiq Apollo4 Plus with the
+       Alliance AS5F18G04SND, an unattended soak of the 1.0 library stopped 2,059 operations with the part's RESET
+       command and found no violation over 1,443 verified boots. Removing power from the board is still to come, and
+       the Winbond driver has run only in the simulator.</p>
 
-    <p>Every simulator build also defines <code>NANDLOG_CHECK_CRC</code>, a switch in <code>nandlog.c</code> for
-       test builds only: each CRC the log carries forward rather than computes whole &mdash; a page's payload CRC,
-       kept up record by record, and the payload CRC a read reports for a page it checked &mdash; is compared with
-       a recompute every time it is used, and a difference stops the program. The campaign, the fuzzer, the
-       exhaustive check and the soak therefore check it at every commit they make.</p>
+    <p>For the hardware status, read <a href="#hardware">On-device tests</a> and <a href="#limits">What host tests
+       cannot tell you</a>. The other sections say what each host check does and how to run it.</p>
 
-    <p>The porting seam is at the SPI command level, so <code>sim/nandlog_port_sim.c</code> emulates a NAND
-       part rather than stubbing out a log: the real chip driver runs on it unmodified, and addressing,
-       status-register handshakes, busy-waiting, the cache register and bad-block bookkeeping are all
-       shipping code under test. The emulated part is built from whatever geometry the compiled driver
-       reports, so the two cannot disagree. It emulates the Winbond part's remap table too, redirecting a
-       remapped block to its spare.</p>
+    <h2 id="simulator">The host simulator</h2>
 
-    <p>NAND semantics are honoured rather than approximated: erase sets bits, programming may only clear
-       them, the part has one cache register that a page read fills and a program load resets, and a program
-       or erase that reported failure is remembered, so a second program of the same page is counted.</p>
+    <p>The simulator is a RAM-backed implementation of <code>nandlog_port.h</code> that behaves like a NAND part.
+       Every host test runs the shipping core and the real chip driver on it, built by <code>sim/Makefile</code>
+       with a host C compiler.</p>
 
-    <h3>What it injects</h3>
+<pre><code>cd sim
+make              # suite and regression tests (five builds), bad-block answers, parser
+make campaign     # crash-point campaign and sweeps (four builds)
+make fuzz         # random calls, faults, and cuts against an independent oracle (nine builds)
+make exhaustive   # every page-state combination below the head, and every metadata write path, cut
+make opcounts     # flash operations and bus bytes of each call
+make windows      # regression tests at erase-ahead windows of 0 and 1 (dead-reserve tests at 3)
+make headpass     # the NANDLOG_PASS_OVER_HEAD_AT_BOOT share of the exhaustive check and campaign
+make soak         # the on-device soak built for the host
+make ablation     # each recovery mechanism removed in turn
+make baselines    # comparison with Dhara and littlefs</code></pre>
+
+    <p><code>make</code> runs the suite and the regression tests under AddressSanitizer and
+       UndefinedBehaviorSanitizer in five builds: record framing off, framing on, relocation through RAM instead of
+       the part's internal copy, the Winbond driver, and every CRC routed through the port
+       (<code>NANDLOG_PORT_CRC32</code>). It then holds about 11 million of the Alliance driver's answers to
+       <code>nandlog_chip_is_bad_block()</code> to a search of its table, across factory marks, retirements, a table
+       moved below the reserve, and <a href="durability.html#bad-blocks">degraded mode</a>. Last, the
+       <a href="#parser">reference parser</a> must agree with the library on every image the suite dumped.</p>
+
+    <p>Every build in <code>sim/Makefile</code> also defines <code>NANDLOG_CHECK_CRC</code>, a test-only switch in
+       <code>nandlog.c</code>. With it, each CRC the log carries forward (e.g., a page's payload CRC, kept up record
+       by record) is compared with a full recompute wherever it is used, and a mismatch aborts the program.</p>
+
+    <p><strong>What is emulated.</strong> Because the porting seam is at the SPI command level, addressing,
+       status-register handshakes, busy-waiting, and bad-block bookkeeping are all shipping driver code under test.
+       The emulated part takes its geometry from the compiled driver, and it emulates the Winbond part's remap table
+       too. An erase sets bits, and a program can only clear them. A program load resets the one cache register to
+       <code>FFh</code> only from its starting column, as on the Alliance part, and a random-data load
+       (<code>84h</code>) outside an internal data move is refused. A read with ECC off returns the cells as they
+       are.</p>
+
+    <p>The simulator counts operations per page and per block, including every second program of a page since its
+       erase, and its snapshots let a campaign restore a nearly full part cheaply for every trial. Most harnesses use
+       fewer blocks than the real part, so that a test can fill the log region in milliseconds: 192 blocks for the
+       regression tests, 128 for the campaign (with an 80-block reserve, so its table trace can retire sixty
+       blocks), and a toy part of four pages a block for the exhaustive check.</p>
+
+    <h2 id="injects">What it injects</h2>
 
     <p>A fault model is a claim about the medium, and an optimistic one passes code that real silicon breaks.
-       The simulator's is deliberately adversarial.</p>
+       Therefore, the simulator's model is deliberately adversarial. A harness can set any of these faults:</p>
 
     <div class="tablewrap">
     <table>
@@ -58,393 +79,303 @@ cd sim &amp;&amp; make baselines  # the comparison with Dhara and littlefs, fetc
         <tr><td>Blocks that always refuse a program, or an erase</td><td><code>faults.unwritable_blocks</code>, <code>faults.unerasable_blocks</code></td></tr>
         <tr><td>Single pages that refuse a program</td><td><code>faults.unwritable_pages</code></td></tr>
         <tr><td>Cells that do not program, while the program reports success</td><td><code>faults.has_stuck_cells</code></td></tr>
-        <tr><td>A cut at the n-th program or erase, which can stop execution there</td><td><code>nandlog_sim_power_cut()</code></td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; between operations: nothing happens</td><td><code>NANDLOG_SIM_CUT_BOUNDARY</code></td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; the first half of the operation applied</td><td><code>NANDLOG_SIM_CUT_PREFIX</code></td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; each bit the operation would change, changed with probability <em>q</em></td><td><code>NANDLOG_SIM_CUT_BITWISE</code></td></tr>
-        <tr><td>&nbsp;&nbsp;&mdash; as above, and the bits left undecided read randomly until erased</td><td><code>NANDLOG_SIM_CUT_UNSTABLE</code></td></tr>
-        <tr><td>An ECC verdict on a page: corrected, uncorrectable, or corrected at the limit, until its block is erased</td><td><code>nandlog_sim_set_ecc_status()</code></td></tr>
-        <tr><td>Worn cells: pages that read corrected at the limit whatever they hold, through every erase</td><td><code>faults.worn_pages</code></td></tr>
+        <tr><td>A dead block: every byte reads <code>00h</code>, and every program and erase is refused</td><td><code>nandlog_sim_kill_block()</code></td></tr>
+        <tr><td>A power cut at the n-th program or erase, after which nothing runs</td><td><code>nandlog_sim_power_cut()</code></td></tr>
+        <tr><td>Cut model: the operation never starts</td><td><code>NANDLOG_SIM_CUT_BOUNDARY</code></td></tr>
+        <tr><td>Cut model: the first half of the page or block takes effect</td><td><code>NANDLOG_SIM_CUT_PREFIX</code></td></tr>
+        <tr><td>Cut model: each bit the operation would change does, with probability <em>q</em></td><td><code>NANDLOG_SIM_CUT_BITWISE</code></td></tr>
+        <tr><td>Cut model: as above, and the undecided bits read randomly until the block is erased</td><td><code>NANDLOG_SIM_CUT_UNSTABLE</code></td></tr>
+        <tr><td>An ECC verdict on a page (corrected, uncorrectable, or at the limit) until its block is erased</td><td><code>nandlog_sim_set_ecc_status()</code></td></tr>
+        <tr><td>Worn cells: pages that read at the ECC limit whatever they hold, through every erase</td><td><code>faults.worn_pages</code></td></tr>
         <tr><td>A page a cut tore reads uncorrectable with ECC on</td><td><code>faults.torn_reads_uncorrectable</code></td></tr>
-        <tr><td>A barely programmed page reads as erased with ECC on, as erased-page handling would show it</td><td><code>faults.ecc_hides_bits</code></td></tr>
+        <tr><td>A barely programmed page reads as erased with ECC on</td><td><code>faults.ecc_hides_bits</code></td></tr>
         <tr><td>Bit rot in place</td><td><code>nandlog_sim_corrupt()</code></td></tr>
-        <tr><td>Time passing: every <em>weak</em> page &mdash; one a cut stopped short of a bit it was to change,
-                or one programmed into a block whose last erase a cut interrupted &mdash; drifts back to erased
-                in every bit, or loses half its programmed bits; a later program of a page that drifted is
-                counted as a defect</td><td><code>nandlog_sim_drift()</code></td></tr>
+        <tr><td>Time passing: weak pages drift (below)</td><td><code>nandlog_sim_drift()</code></td></tr>
         <tr><td>A part that never clears BUSY</td><td><code>faults.stay_busy</code></td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>The weak-erase model is the part of that worth spelling out: a block whose erase a cut interrupted can
-       read erased and still hold charge unevenly, so a page programmed there may drift later. Only a page whose
-       program completed in a block whose erase completed never drifts. A read with ECC turned off always shows
-       the cells as they are, which is what the drivers' blank test relies on. Besides counting reads, programs and
-       erases in all, it counts each page's latches, read disturb's measure, and each block's programs and erases,
-       so a test can tell what a boot wrote to the metadata from what it erased ahead of the head. The simulator can also dump a byte-for-byte image of the emulated part, load one back, and
-       snapshot and restore it cheaply, so a campaign can afford a fresh copy of a nearly full part per
-       trial.</p>
+    <p><strong>Weak pages.</strong> A page is <em>weak</em> if a cut stopped its program short of a bit it was to
+       change, or if it was programmed into a block whose last erase a cut interrupted, since such a block can read
+       erased and still hold charge unevenly. <code>nandlog_sim_drift()</code> plays a long wait: each weak page
+       drifts back to erased in every bit, or loses each programmed bit with even odds. A page whose program and
+       whose block's erase both completed never drifts. Programming a drifted page again counts as a violation.</p>
 
-    <h3>What it covers</h3>
+    <h2 id="coverage">The suite and the regression tests</h2>
 
-    <p>The suite: round trip; a record sized to fill a page exactly; epoch details; write-head recovery
-       across a reboot; factory bad-block markers; block retirement; relocation without bus traffic; listing
-       and reading an earlier epoch; a torn page; a rotted payload; a disabled log; reads refused outside a
-       session; the busy timeout ending in <code>nandlog_port_fatal()</code>; a date-limited read across a
-       backward time step; and an image with a relocation and a tombstone in it, for the parser.</p>
+    <p>The suite checks ordinary behavior, and the regression tests check the failure modes the design guards
+       against, one at a time. <code>make</code> runs both in all five configurations.</p>
 
-    <p>The regression tests, in <code>sim/nandlog_sim_regress.c</code>, hold one or more tests for each
-       defect found while the library was reviewed and attacked before its release, each checked to fail
-       against the code in which it was found. The first group &mdash; recovery past a retired block or an unreadable page at every position of
-       an epoch, a torn page at the head, a light tear the ECC engine hides, a full region and a failure at
-       the wrap, the epoch's first block retired, each way a relocation can go wrong, a second program after a
-       failure, the ECC status the Alliance part uses for a page corrected at its limit, a cut anywhere in a
-       bad-block table update or in the first boot, a table larger than the reserve, read accounting over a
-       retired block and of an earlier epoch, logging before the first epoch, an epoch whose first block will
-       not erase, records buffered across <code>begin_epoch()</code>, erase-ahead blocking and double erases,
-       the statuses and counters, a payload that did not program, the unlocked accessors, and the cost of a
-       boot.</p>
+    <p><strong>The suite</strong> (<code>sim/nandlog_sim_test.c</code>) covers round trips, a record that fills a page
+       exactly, <a href="api.html#epochs">epoch</a> metadata, write-head recovery across a reboot, factory bad-block
+       markers, block retirement, relocation without bus traffic, earlier epochs, torn and rotted pages, a disabled
+       log, reads outside a <a href="api.html#sessions">session</a>, the busy timeout, date-limited reads across a
+       backward time step, exact byte totals, and framed records. It also dumps an image with a relocation and a
+       tombstone in it, for the parser.</p>
 
-    <p>A second group holds what an adversarial tester and a reviewer found: a bad-block table update and a metadata slot torn under the unstable
-       model, which must read the same on every later boot; a read loop with a buffer of
-       <code>NANDLOG_MAX_DATA_BYTES_PER_PAGE</code>, of which nothing past the payload may be written; an
-       earlier epoch that filled the region from a retired first block, and one with a page torn so lightly its
-       header reads erased; each page reported in its own record format; a record length near
-       2<sup>32</sup>; a time window ending before the first record, and a record stamped
-       <code>0xFFFFFFFF</code>; a flush while disabled, and by-sequence reads after a read has ended and of the
-       buffered page; an unreadable newest metadata slot, one copy and every copy, and an unreadable page of
-       the newest table version; a program refused at the wrap, and one no block would take, neither of which
-       a reboot may program again; a page below the head that comes to read blank; a read's byte total with
-       records stored during it; and a block whose erase a cut interrupted, which must be erased again before
-       the head programs it. <code>./nandlog_sim_regress &lt;name&gt;</code> runs one test, and
-       <code>NANDLOG_VERBOSE=1</code> shows the library's diagnostics.</p>
+    <p><strong>The regression tests</strong> (<code>sim/nandlog_sim_regress.c</code>) number 103 in the framed
+       Alliance build. By topic:</p>
+    <ul>
+      <li><strong>The write head</strong> (the next position the log will program) never moves for a fault anywhere
+          in the epoch, and no torn, drifted, or blank page below it pulls it back. The head search's first probes
+          move from boot to boot.</li>
+      <li><strong>Erases</strong> happen once per block, never in the call that commits a page, and never reach the
+          current epoch's own blocks. A block whose erase a power cut interrupted is erased again before the head
+          programs it.</li>
+      <li><strong>Relocation</strong> never trusts a target that refused a copy or an erase, and moves an unreadable
+          page as a tombstone. A page that failed a program is never programmed again, even after a reboot.</li>
+      <li><strong>The bad-block table</strong> never rolls back after a cut, a torn version, a torn mark, or a stray
+          bit in a mark. The recovery utility (<code>nandlog_reset_bad_block_table()</code>) keeps every retired
+          block.</li>
+      <li><strong>With a dead reserve</strong>, the table moves below it once, and later boots find it cheaply. With
+          nowhere for the table, a block's own mark retires it. With no free pair at all, the log stops and says
+          so.</li>
+      <li><strong>The <a href="format.html#layout">metadata ring</a></strong> survives torn, unreadable, and
+          half-written slots, and a lost slot is recovered from the epoch's pages. A
+          <a href="format.html#metadata-slot">sealed</a> epoch stays sealed, and a new epoch begun after it erases
+          none of its pages. A warm boot reads a handful of ring pages.</li>
+      <li><strong>A metadata copy at the ECC limit</strong> is written again elsewhere, once, and a page stuck there
+          costs one write, not one per boot.</li>
+      <li><strong>Reads</strong> declare exact byte totals, never write past a payload's worth of the caller's
+          buffer, and never serve other records under a sequence number already served.</li>
+      <li><strong>The API</strong> says why it refuses each record, never reports a dropped record stored, catches a
+          payload that did not program, and takes the library's lock in every accessor.</li>
+      <li><strong>The CRC-32</strong> is zlib's, continues exactly from any split, and matches the payload on every
+          path that commits or serves a page.</li>
+    </ul>
 
-    <p>A third group holds what a second adversarial tester and a fifth reviewer found: two torn pages below the head that later drift blank, in every
-       placement across a block boundary; a torn page drifting blank under a durable page, and under one that
-       rotted; a blank page followed by an unreadable one; an epoch whose slot is lost after it wrapped onto
-       the older epoch's first block; epoch details unreadable in one copy, torn in the first copy, and torn in
-       the second; a bad-block table that lost its newest
-       retirement; an epoch only one copy of whose slot could be written; and sequence numbers a read has
-       served, after more records, after a reboot, and after a cut in the boot that recovers a rotted page.</p>
+    <p><code>make windows</code> reruns the regression tests with an
+       <a href="getting-started.html#configure">erase-ahead window</a> of 0 blocks and of 1 (the default is 2), and
+       the dead-reserve tests at 3. <code>make headpass</code> covers
+       <a href="getting-started.html#pass-over-head"><code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code></a>, which the
+       regression tests skip because they check exact head positions that the option moves on purpose. To run some
+       tests alone, pass part of their function names (<code>./nandlog_sim_regress test_k</code>), and set
+       <code>NANDLOG_VERBOSE=1</code> for the library's diagnostics.</p>
 
-    <p>A fourth group holds what a third adversarial tester found, and two defects found while those were being
-       fixed: a cut in the slot that
-       lists a torn page, under the unstable model, which must neither drop nor roll back the positions listed
-       before it; an epoch whose passed-over list fills, which must stay refused across reboots and drift; a cut
-       between a bad-block table version and its spare-area mark, followed by the recovery utility; a rebuild
-       from the marks over a block whose first page only reads uncorrectable; the recovery utility over
-       factory-bad blocks of the reserve, and logging on through a retirement after it in the same boot; records
-       stranded in RAM when the Winbond part's remap table fills; an epoch whose slot and first page are both
-       unreadable; a cut in the erase that tombstones a listed page at the start of a block; and a cut between a
-       boot's relocation of the head's block and the ring's record of it.</p>
+    <h2 id="campaign">The crash-point campaign</h2>
 
-    <p>A fifth group holds what a fourth adversarial tester found: a cut late in the erase that enters a block,
-       under the unstable model, which the head search and the boot's next look can read differently; the
-       recovery utility with a block of the reserve that will not erase, or a cut, while an older table version
-       is still on the part; the utility with a retired block whose mark will not take; and a newer epoch whose
-       every slot copy is lost while the slot before it is sealed, which must still be found from its pages and
-       never have its number given to another.</p>
-
-    <p>A sixth group holds what a fifth adversarial tester found, all of it a decision made from more than one
-       read of a page a cut may have left unstable: a bad-block table page whose version came from one read and
-       its checksum from another; a spare-area mark a cut left part-way, which reads as a mark once and as none
-       the next time; and a relocation that judged a torn page from its header and then let the part latch it
-       again for the copy. With them, a new epoch begun after a seal whose layout is unverified, which must erase
-       none of the old epoch's pages, and a record the same call has to drop, which must be refused rather than
-       reported stored. A seventh holds what a review found: the head search's first probes, which must move
-       from boot to boot and still find the head. <code>make windows</code> runs the regression tests again with
-       an erase-ahead window of 0 blocks and of 1, and the dead-reserve tests below at a window of 3.</p>
-
-    <p>An eighth group comes from a board whose reserve, and the top of whose log region, were found dead: every
-       byte <code>00h</code>, every program and erase refused, which the simulator models as a block that is
-       killed for good. A part's first block mark-programmed byte for byte; the whole reserve and the region's top
-       three blocks dead, where the table moves to the pair below them once and every later boot finds it there
-       without the scan of every mark; the reserve and every block the table's search reaches dead, where a block
-       failing under the head is retired by its own mark and logging goes on; the reserve dead and a runtime
-       failure kept in a version below it; the board's own shape, the reserve and the region's top eighteen
-       blocks dead, with warm boots no costlier than a healthy part's plus the search; six of the reserve's eight
-       table blocks dead, where the table rotates over the other two and never leaves the reserve; a cut at every
-       operation, under four models, of the boot that moves the table off a reserve that died under it, of a
-       retirement kept below the reserve, and of one committed by a mark alone; the table's own pair failing, so
-       the marks take over in the same call and the next boot moves the table to a new pair, its old versions
-       never loaded again; the recovery utility with the table below the reserve; and a healthy part, which must
-       never read a page below its reserve at boot nor ask for blocks. Then the cases neither the table nor the
-       marks can record: a block under the head that refuses even its mark while the table's pair fails, where the
-       table gets a new pair in the middle of the commit and logging goes on; the same cut at every operation; a
-       block the erase-ahead tops the window up with that refuses its erase and its mark, where the window must be
-       counted again from nothing &mdash; and, at a window of 3, the same with the only free pair two blocks the
-       window already counts, where the block past them must still be erased before the head enters it; a
-       relocation whose target holds no copies yet, the only free pair, which must never be given to the table;
-       and, with no pair anywhere, the log stopping and saying so exactly as before.
-       Those that change behaviour fail against the code before them: logging stopped at the first runtime failure,
-       then at the first block that refused its mark, and every boot rescanned every mark.</p>
-
-    <p>A ninth group checks the CRC itself and the page CRC the log keeps up as records are stored, judging what
-       reaches the medium with the test file's own bitwise CRC: zlib's check value, and a page's worth of bytes
-       at each alignment continued from every split and in three pieces; every path that commits a page &mdash;
-       records of every awkward size, empty ones included, committed because the next did not fit, because time
-       stepped back, by a partial flush, by a full one, by <code>begin_reading()</code>, by
-       <code>begin_epoch()</code> and around a reboot, with refused records in between; a page tried again after a
-       failed program and after a failed read-back; records dropped with a commit no block would take; and every
-       way of serving a page, which must report the payload CRC of exactly the bytes served. In the port-CRC build
-       a tenth test counts the bytes the hook is given: a store its record, a commit its header alone, a page served
-       its header and its payload once. Each fails if the CRC's bookkeeping is taken out of any one of the paths it
-       is kept on.</p>
-
-    <p>A tenth group holds what a later review found: the two copies of each metadata record share a block that
-       every boot reads and a clean boot never writes. With either copy of the newest slot, or of the newest table
-       version, read only at the ECC limit, the boot must write the record again into a fresh block &mdash; the
-       slot as the next ring block's first pair, the version with the same entries &mdash; changing neither the
-       epoch, nor its list, nor its positions, nor anything retired, and the next boot must write nothing. A page stuck at
-       the limit through every erase must cost one boot one write over twenty boots, and never hold the newest
-       record again, while the ring wraps right round past it a new epoch and a boot at a time, or when a
-       retirement's version would land on another such page. And a cut at every operation of those rewrites, under
-       four models, must leave every boot after going by the same epoch, and the boots after must stop writing. On the Winbond
-       part, whose status for "at the limit" means uncorrectable, the same faults must write nothing. Each fails
-       against the code before it, which never wrote either record again.</p>
-
-    <p>An eleventh group comes from the thirteenth review. A host takes a read's span &mdash; its first sequence
-       number and page count &mdash; closes the read, and fetches the span by sequence number while every store
-       commits a page, across a failed program that relocates the head's block and retires it, whose old address is
-       then made unreadable: every store must succeed and every page come back under its own sequence number. And
-       the seal of an epoch whose layout the table no longer confirms must still be known a boot later, so that a
-       new epoch begun then erases none of the old epoch's pages, which must all read back as an earlier epoch
-       &mdash; once for a block retired when it refused its erase, once for a relocated head's block. That second
-       test fails against the code before it, whose seal recorded the epoch as the wrong table laid it out.</p>
-
-    <p>A twelfth group comes from the fourteenth review. A degraded-mode retirement of the head's failed block is
-       cut in its mark, the next boot's relocation of the block is cut part-way through the copies, and the mark
-       then reads as one, as a mark a cut left part-way can: the boot after must seal the epoch, nothing of the
-       pages left in the block written over, where the code before it laid the epoch out without them and logged on
-       over their positions. And the epoch's slot is rewritten as a build with another
-       <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code> would have written it &mdash; details longer than the limit, or a
-       list longer than the room it leaves &mdash; and the boot must find the epoch and seal it whole, every page, the
-       details and the list kept, and a new epoch then begun past it; the code before it found no epoch at all, and
-       the next epoch began over the old one's first blocks.</p>
-
-    <h3>The crash-point campaign</h3>
-
-    <p><code>make campaign</code> runs each of fourteen traces &mdash; a first boot and two epochs; a block
-       failing under the head and a window block refusing its erase; the epoch's first block failing; seventy
-       epochs through the metadata ring; four retirements across the bad-block table's block boundary; the
-       region filling, a warm boot of it full, and a new epoch on it; the last block before the wrap failing;
-       an epoch wrapping onto blocks that refuse an erase or fail; a boot settling a metadata slot, and a
-       bad-block table version, that a cut tore under the unstable model; a boot erasing again a block whose
-       only page of the epoch is torn; a commit no block will take, recorded and relocated after a reboot;
-       torn commits listed by the boots after them, interleaved with cuts in those boots' slot writes; and a
-       block failing under the head that refuses even its mark, while on a dead reserve the table's pair refuses
-       too, so the table gets a new pair in the middle of the commit &mdash; once uncut to count its programs and erases, then once for every one of them with power cut
-       there, under each of the four cut models; again with a second cut at every operation of the reboot
-       that recovers; and again with the second cut at the first operations of the logging after that reboot,
-       where the first commits past whatever it passed over land. After each it holds the log to the
-       durability contract: every durable record delivered intact from its own epoch, unless a newer epoch has
-       swept its block; nothing delivered damaged or twice; every page and gap carrying its own position's
-       sequence number; exact byte totals; no page programmed twice outside a block being retired; no good
-       block retired; no factory-bad block forgotten; and what any audit served under an epoch and sequence
-       number served again by every later one, or a gap, and never records stored after it was a gap. After an
-       unstable cut it reboots and audits three times more, so a boot that reads a torn page one way and a
-       later one that reads it the other cannot both pass. Then time passes: every weak page drifts, to blank
-       or to half its bits, and the device boots, is audited, logs on, boots and is audited again.</p>
-
-    <p>It then sweeps recovery, without cuts, over a rotted header, an uncorrectable page, a page at the ECC
-       limit, and a retired block, at every position of short epochs and a spread of positions in long ones,
-       from the region's start and across its wrap; and sweeps the metadata, rotting, making uncorrectable, or
-       leaving whole but read only at the ECC limit, every written page of the ring and of the bad-block table in
-       turn, on a part with forty epochs and forty-odd table versions behind it, where one such page must change
-       neither the epoch, nor its head, nor the epochs listed, nor the blocks retired. A boot may write the newest
-       slot or table version again, which is counted; the boot after it must write neither; and a page read at the
-       ECC limit must have its record written again exactly when it is a copy of the newest. Seeds are fixed, so
-       every run is the same run.</p>
-
-    <p>All of that runs in three builds: as shipped; with an erase-ahead window of 0 blocks, where every block is
-       entered by an erase inside a commit, so a cut in that erase is where a boot finds the head; and with
-       <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code>, the traces alone, since the sweeps check that the head lands
-       on an exact position, which that option moves on purpose (<code>campaign_default</code>,
-       <code>campaign_w0</code> and <code>campaign_headpass</code> run one each); and a fourth time, traces and
-       sweeps, on a part whose reserve's eight table blocks and region's top two blocks are dead, as one board was
-       found, so the first boot moves the table to a pair below them and every trace runs with it there
-       (<code>campaign_dead</code>; the metadata sweep then rots the pair's pages). It takes about an hour and a half
-       on twelve cores, one job per trace and cut model, and prints a table of the results for each build.</p>
-
-    <h3>The fuzzer</h3>
-
-    <p><code>make fuzz</code> drives the library with random calls &mdash; records of random length and time,
-       now and then stepping back; flushes; new epochs; reboots &mdash; and random faults: pages and blocks
-       that refuse programs or erases in the log region, the ring and the table's reserve, pages read at the
-       ECC limit or not at all, one copy of the newest metadata slot or table version made unreadable. Power
-       cuts land a few operations after random steps, under all four models, in boots too. After every boot
-       an oracle written independently of the library reads every listed epoch and checks that every durable
-       record of the current epoch is delivered intact, that nothing delivered is damaged, duplicated or another
-       epoch's, that every valid page sitting at its own position is delivered, that byte totals are exact,
-       that by-sequence reads match the sequential read, that no page is programmed twice, and that what any
-       read of the run served under an epoch and sequence number is served there by every later one, or a gap.
-       Now and then time passes, and the weak pages drift before a reboot. Nine builds &mdash; the
-       regression tests' part; parts whose log region is 40 blocks, with and without the internal copy; the
-       Winbond driver; a window of 0 blocks; the head pass-over; two parts whose reserve and region's top two
-       blocks are dead, one where the table moves to a pair below them and one where the table's search reaches
-       only dead blocks, so every retirement is by a mark; and the port-CRC configuration &mdash; twelve fixed
-       seeds each, twelve thousand steps a seed, under the sanitizers; about eleven minutes on twelve cores. In the dead-reserve builds the faults aimed
-       at the table's blocks are aimed at the blocks below the reserve.</p>
-
-    <h3>The bounded-exhaustive check</h3>
-
-    <p><code>make exhaustive</code> goes the other way: rather than run the library into power cuts, it lays
-       the states a part can be in down directly, and enumerates every combination of them over the four
-       positions just below the write head of a toy part &mdash; four pages a block, five log blocks &mdash;
-       then boots the shipping core and driver over each. A position is a committed page, a rotted one, a torn
-       page the epoch's slot lists (unreadable, with a header that checks over a bad payload, drifted blank, or
-       tombstoned), or, directly below the head, a torn page no boot has listed yet; and, outside the fault
-       model, a committed page that reads blank in every bit. Five scenarios put the window everywhere the layout
-       has an edge: part-way into a block, at a block the epoch has not entered (erased, holding an earlier
-       epoch's pages, or holding an erase's remains), across a retired block, down to the epoch's first page,
-       and across the wrap. For each combination it checks that the boot found the head, that the medium and
-       the newest slot, read by the check's own parser, satisfy the invariant of <code>nandlog.c</code>, that
-       after six more pages and a reboot every committed page and every new one is delivered once and intact,
-       and that no position below the head serves anything new. 18,585 combinations, of which 10,416 are
-       within the fault model.</p>
-
-    <p>Its second part enumerates the metadata write paths: a boot listing a torn page, one listing another
-       onto a list that already holds a run where the head search probes first, one listing a torn page at the
-       start of a block and then erasing and tombstoning the block, a new epoch, a boot settling a torn slot, a
-       failed program with its relocation, retirement, table version, mark and ring records, a window block that
-       will not erase, and the recovery utility followed by logging and a retirement in the same boot. Each is
-       cut at every operation it does, under eight cut models, with no further damage, with one copy of the
-       newest slot or table version damaged as well, or with one of them read only at the ECC limit; then weak
-       pages drift, the device boots, logs, its new pages drift too if they went into a block whose erase a cut
-       stopped, and it is audited again. A refusal to log after a cut alone counts as a failure, and so does one
-       after a cut and a copy at the ECC limit, which is no fault; and then the first boot must also have written
-       that record again, elsewhere. Both parts run as shipped and with a window of 0, and the
-       metadata part with the head pass-over. The metadata part runs twice more on a toy part of nine log blocks
-       whose reserve is dead: once where the table's search reaches the region's top eight, with five paths of its
-       own &mdash; a boot moving the table, held in the marks, to a pair below the reserve under an epoch; a
-       retirement that rotates it to the pair's other block; the pair refusing a retirement, so the marks take over
-       and the block's mark retires it; the boot after that, moving it to a new pair; and the pair refusing a
-       retirement of a block that refuses even its mark, so the table gets a new pair in the middle of the commit
-       &mdash; and once where the search reaches only dead blocks, so every path retires by a mark, and the last one
-       stops the log safely. About five minutes in all.</p>
-
-    <p><code>make headpass</code> runs the head pass-over's share on its own: the exhaustive check's metadata
-       part and the campaign's traces. The regression tests and the campaign's sweeps check that the head lands on
-       an exact position, which that option moves on purpose, so they run only without it.</p>
-
-    <p>The campaign builds the driver over a part with a 40-block log region, the regression tests over one with
-       168 (208 on the Winbond driver), and the exhaustive check over a toy part, so that a trace can fill the whole
-       log region cheaply; everything else is the shipping code. The campaign alone keeps the 80-block reserve of
-       earlier builds, so its table trace can retire sixty blocks the log never uses; the others build the Alliance
-       driver with the 16-block reserve it ships with.</p>
-
-    <h3>The ablation: do the checks notice a mechanism gone?</h3>
-
-    <p>That nothing above found a violation is only worth something if the checks would find one. <code>make
-       ablation</code> builds the library once for each <code>NANDLOG_MUTATE_*</code> switch in
-       <code>nandlog.c</code> &mdash; test switches, off unless a build defines them, that each take one
-       mechanism of the recovery argument away &mdash; and runs the regression tests, the exhaustive check and a
-       short subset of the campaign (every sweep, and the <code>tornloop</code>, <code>slottorn</code>,
-       <code>tabletorn</code>, <code>blocktorn</code>, <code>first</code> and <code>unwritable</code> traces
-       under one model each) and the fuzzer's twelve seeds against each. About seventeen minutes on twelve cores.</p>
+    <p>The campaign cuts power at every program and erase of fourteen fixed scenarios, then reboots and audits the
+       log. Each <em>trace</em> is a fixed sequence of library calls from a fixed starting state:</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Mechanism taken away</th><th>Regression tests that fail</th><th>Exhaustive: combinations / metadata trials that fail</th><th>Campaign subset: trials that break the contract</th><th>Fuzz: seeds that report a violation</th></tr></thead>
+      <thead><tr><th>Trace</th><th>What it exercises</th></tr></thead>
+      <tbody>
+        <tr><td><code>basic</code></td><td>A first boot, two epochs, partial flushes, a factory-bad block</td></tr>
+        <tr><td><code>reloc</code></td><td>A block failing under the head, and a window block refusing its erase</td></tr>
+        <tr><td><code>first</code></td><td>The epoch's first block failing three pages in</td></tr>
+        <tr><td><code>ring</code></td><td>Seventy epochs, crossing a metadata ring block</td></tr>
+        <tr><td><code>table</code></td><td>Four retirements across the bad-block table's block boundary</td></tr>
+        <tr><td><code>full</code></td><td>The region filling, a warm boot of it full, and a new epoch on it</td></tr>
+        <tr><td><code>wrapfail</code></td><td>The last block before the wrap failing</td></tr>
+        <tr><td><code>wrapbad</code></td><td>An epoch wrapping onto blocks that refuse an erase or fail</td></tr>
+        <tr><td><code>slottorn</code></td><td>A boot settling a metadata slot torn under the unstable model</td></tr>
+        <tr><td><code>tabletorn</code></td><td>A boot settling a table version torn the same way</td></tr>
+        <tr><td><code>blocktorn</code></td><td>A boot erasing again a block whose only page of the epoch is torn</td></tr>
+        <tr><td><code>unwritable</code></td><td>A commit no block will take, relocated after a reboot</td></tr>
+        <tr><td><code>tornloop</code></td><td>Torn commits listed by later boots, with cuts in those boots' slot writes</td></tr>
+        <tr><td><code>refused</code></td><td>A block refusing even its mark, and on a dead reserve the table's pair failing too</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Each trace runs once uncut, to count its operations. Then, for every operation and each of the four cut
+       models, the part is restored and the trace is cut there, with <em>q</em> drawn from eight values between
+       0.0005 and 0.995. The device reboots, is audited, logs forty more pages, reboots, and is audited again. A
+       second pass adds a second cut at every operation of the recovering boot, and a third adds it at the first
+       operations of the logging after that boot. An unstable cut earns three more reboots and audits, so two boots
+       cannot read a torn page differently and both pass. Finally, every weak page drifts, and the device is audited
+       twice more.</p>
+
+    <p>The audit checks that every record whose commit returned before the cut is delivered intact and once, from
+       its own epoch (unless a later epoch has swept its block), under its position's sequence number, with an exact
+       byte total. It also checks that no page is programmed twice outside a block being retired, that no good block
+       is retired or factory-bad block forgotten, and that a sequence number never serves other content than it
+       served before. Separately, the campaign counts pages that read erased in every bit and were programmed again
+       after a reboot. No read can detect such a page, so the count is reported as a residual risk.</p>
+
+    <p><strong>The sweeps.</strong> Without cuts, the campaign sweeps recovery over a rotted header, an uncorrectable
+       page, a page at the ECC limit, and a retired block, at every position of short epochs and across the wrap.
+       It then rots, makes unreadable, or reads at the ECC limit each written page of the ring and the table on a
+       part with forty epochs behind it. No such page may change the epoch, its head, the epochs listed, or the
+       blocks retired.</p>
+
+    <p><strong>Four builds.</strong> The campaign runs as shipped, with an erase-ahead window of 0, with the head
+       pass-over (traces only), and on a part whose reserve's eight table blocks and the region's top two blocks are
+       dead. <code>campaign_default</code>, <code>campaign_w0</code>, <code>campaign_headpass</code>, and
+       <code>campaign_dead</code> run one each. Seeds are fixed, so every run is the same run.</p>
+
+    <h2 id="fuzz">The fuzzer</h2>
+
+    <p><code>make fuzz</code> drives the library with random calls and faults, and checks every boot against an
+       oracle written independently of the library. A step is a record of random length and time (sometimes stepping
+       back), a flush, a new epoch, a reboot, or a fault. Faults include blocks and pages that refuse programs or
+       erases (in the log region, the ring, or the reserve), pages read at the ECC limit or not at all, and an
+       unreadable copy of the newest slot or table version. About one step in 30 arms a power cut a few operations
+       ahead, under any cut model, so cuts land in boots too. Now and then weak pages drift before a reboot.</p>
+
+    <p>The oracle checks much of what the campaign's audit checks, and also that every valid page sitting at its
+       own position is delivered and that pages fetched by sequence number match the sequential read. It runs
+       twelve fixed seeds of 12,000 steps under the sanitizers, in nine builds: the regression tests' part, 40-block
+       log regions with and without the internal copy, the Winbond driver, a window of 0, the head pass-over, two
+       dead-reserve parts (the table moved below the reserve, and nowhere for it), and the port CRC.</p>
+
+    <h2 id="exhaustive">The bounded-exhaustive check</h2>
+
+    <p>The campaign and the fuzzer reach states by running the library into power cuts. <code>make
+       exhaustive</code> instead lays states down directly and enumerates every combination over the four positions
+       just below the write head of a toy part. A position can be a committed page, a rotted one, or a torn page in
+       any of four listed states: unreadable, with a header that checks over a bad payload, drifted blank, or
+       tombstoned. Directly below the head, it can also be a torn page no boot has listed yet. Five scenarios place
+       the window at each edge of the layout: inside a block, at a block the epoch has not entered, across a retired
+       block, at the epoch's first page, and across the wrap.</p>
+
+    <p>For each combination, the boot must find the head, and the medium must satisfy the invariant stated in
+       <code>nandlog.c</code>, read by the check's own parser. After six more pages and a reboot, every committed page
+       and every new one must be delivered once and intact, and no position below the head may serve anything new.
+       Of 18,585 combinations, 10,416 lie within the fault model. The rest hold a committed page that reads blank in
+       every bit, and they must still place the head correctly.</p>
+
+    <p><strong>Metadata write paths.</strong> The second part runs the real code into nine metadata write paths,
+       among them listing a torn page, beginning an epoch, settling a torn slot, a failed program with its
+       relocation and retirement, and the recovery utility. Each is cut at every operation under eight cut models,
+       and each cut comes alone, with one copy of the newest slot or table version damaged, or with one copy read at
+       the ECC limit. The device then boots and is audited, lets weak pages drift, logs three pages, drifts again, and
+       is audited once more. A refusal to log after a cut alone is a failure. Five builds run: as shipped, with a
+       window of 0, with the head pass-over (metadata only), and two dead-reserve parts with five extra paths that
+       move, rotate, and replace the table.</p>
+
+    <h2 id="ablation">The ablation: do the checks notice a missing mechanism?</h2>
+
+    <p>A clean result is only worth something if the checks would catch a broken library. <code>make
+       ablation</code> builds the library once for each <code>NANDLOG_MUTATE_*</code> switch in
+       <code>nandlog.c</code>, each of which removes one recovery mechanism (they are for test builds only and
+       default to 0). Each build runs the regression tests, the exhaustive check, the fuzzer's twelve seeds, and a
+       campaign subset: every sweep, <code>tornloop</code> under all four cut models, and <code>slottorn</code>,
+       <code>tabletorn</code>, <code>blocktorn</code>, <code>first</code>, and <code>unwritable</code> under one
+       each.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Mechanism removed</th><th>Regression tests that fail</th><th>Exhaustive: combinations / metadata trials that fail</th><th>Campaign subset: trials that break the contract</th><th>Fuzz: seeds that report a violation</th></tr></thead>
       <tbody>
         <tr><td>None: the library as shipped</td><td>0</td><td>0 / 0</td><td>0</td><td>0 of 12</td></tr>
-        <tr><td>The passed-over list, in the head search</td><td>3 (S1, Q2, U1)</td><td>2,483 / 1,816</td><td>8</td><td>12 of 12</td></tr>
-        <tr><td>The erase guard</td><td>2 (D4, S3)</td><td>10,368 / 9,791</td><td>0</td><td>0 of 12</td></tr>
-        <tr><td>One read of each slot copy: judged from a second read, used as the first</td><td>1 (U1)</td><td>0 / 16 before the run aborts</td><td>0</td><td>0 of 12</td></tr>
-        <tr><td>The block-entry rule</td><td>4 (A1, U9, U10, X1)</td><td>0 / 0</td><td>0</td><td>0 of 12</td></tr>
-        <tr><td>Numbered positions: the head is the first header that reads erased</td><td>10 (D2, R2, A1, S1, Q1, S2, Q2, U1, K3, K10)</td><td>5,131 / 2,395</td><td>5,130</td><td>12 of 12</td></tr>
-        <tr><td>Tombstones: a position that cannot keep its page is left blank</td><td>1 (D5)</td><td>3,011 / 0</td><td>0</td><td>0 of 12</td></tr>
+        <tr><td>The <a href="format.html#metadata-slot">passed-over list</a>, in the head search (<code>IGNORE_PASSED_OVER</code>)</td><td>3</td><td>2,483 / 1,816</td><td>8</td><td>12 of 12</td></tr>
+        <tr><td>The erase guard (<code>NO_ERASE_GUARD</code>)</td><td>2</td><td>10,368 / 9,791</td><td>0</td><td>0 of 12</td></tr>
+        <tr><td>One read per slot copy: judged from a second read, used from the first (<code>READ_SLOT_TWICE</code>)</td><td>1</td><td>0 / 16, then the run aborts</td><td>0</td><td>0 of 12</td></tr>
+        <tr><td>The block-entry rule (<code>NO_BLOCK_ENTRY_RULE</code>)</td><td>4</td><td>0 / 0</td><td>0</td><td>0 of 12</td></tr>
+        <tr><td>Numbered positions: the head is the first header that reads erased (<code>NAIVE_HEAD_SEARCH</code>)</td><td>11</td><td>5,131 / 2,395</td><td>5,130</td><td>12 of 12</td></tr>
+        <tr><td>Tombstones: a position that cannot keep its page is left blank (<code>NO_TOMBSTONES</code>)</td><td>1</td><td>3,011 / 0</td><td>0</td><td>0 of 12</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>Every mechanism's loss is noticed, and by the regression tests in every case; the exhaustive check notices
-       five of the six &mdash; not the block-entry rule, whose loss shows only once a page programmed into a block
-       an interrupted erase left drifts, which its first part does not model &mdash; and the short campaign subset
-       and the fuzzer two each. No check here is redundant with the others. Given every job of the campaign
-       instead of the subset (<code>CAMPAIGN=full OUT=ablation_full.out LIMIT=14400 sh ablation.sh</code>, about
-       an hour and a half on twelve cores), the campaign notices five of the six, the block-entry rule among
-       them; it misses only the tombstones' loss, which the exhaustive check and the regression tests notice.</p>
+    <p>The regression tests notice every removal, and the exhaustive check notices five of the six. It misses the
+       block-entry rule, whose loss shows only when pages programmed into a block an interrupted erase left behind
+       later drift. The campaign subset and the fuzzer notice two each. Given every campaign job instead of the
+       subset (<code>CAMPAIGN=full OUT=ablation_full.out LIMIT=14400 FUZZ_SEEDS= sh ablation.sh</code> in
+       <code>sim/</code>), the campaign notices five of the six, the block-entry rule among them, and misses only the
+       loss of tombstones.</p>
 
-    <h3>The power-cut soak, on the host</h3>
+    <h2 id="soak-host">The power-cut soak, on the host</h2>
 
-    <p><code>make soak</code> builds the on-device soak, <code>tests/test_nandlog_powercut.c</code>, unchanged
-       for the host &mdash; its <code>main()</code> renamed, the board's few functions supplied by
-       <code>sim/nandlog_sim_soak.c</code> &mdash; over the simulated Alliance part with a factory-bad block in
-       the log region. A thousand boots, each cut at random: inside a program or erase, under one of the four cut
-       models, or between operations, wherever the soak waits. <code>tests/powercut_check.py</code> then checks
-       the serial output it would have printed against the contract, and the run is repeated for sixty boots with
-       one committed bit cleared before boot 45, which the checker must report. Under a minute.</p>
+    <p><code>make soak</code> builds the on-device soak, <code>tests/test_nandlog_powercut.c</code>, unchanged for the
+       host, with <code>sim/nandlog_sim_soak.c</code> supplying the board's few functions. It runs a thousand boots
+       over the simulated Alliance part, each with a power cut at random inside a program or erase or between
+       operations, and <code>tests/powercut_check.py</code> checks the serial output. A second run of 60 boots
+       clears one committed bit before boot 45, and the checker must report it.</p>
 
-    <h3>The comparison with Dhara and littlefs</h3>
+    <h2 id="baselines">The comparison with Dhara and littlefs</h2>
 
-    <p><code>make baselines</code> runs <code>sim/baselines/reproduce.sh</code>: it fetches Dhara and littlefs
-       at pinned commits into <code>sim/baselines/third_party/</code>, which git ignores, so neither is ever part
-       of this repository; cross-compiles all three for a Cortex-M4F and measures their footprint, if
-       <code>arm-none-eabi-gcc</code> is installed; and counts the flash operations of each stack over the same
-       driver and simulated part, for the same record stream at the same flush cadence. The glue that puts each
-       on the driver is in <code>sim/baselines/glue/</code>, and what is compared is set out at the top of
-       <code>reproduce.sh</code>. About five minutes on seven cores, each job holding a 1.2&nbsp;GB simulated
-       part.</p>
+    <p><code>make baselines</code> runs <code>sim/baselines/reproduce.sh</code>. It fetches Dhara and littlefs at
+       pinned commits into <code>sim/baselines/third_party/</code>, which git ignores, and measures all three stacks'
+       Cortex-M4F footprint if <code>arm-none-eabi-gcc</code> is installed. It then counts each stack's flash
+       operations over the same driver, simulated part, and record stream, and models a durable flush cycle's time
+       and energy from those counts and the benchmark's measured primitives. The top of <code>reproduce.sh</code>
+       says exactly what is compared.</p>
 
-    <h2>On-device tests</h2>
+    <h2 id="hardware">On-device tests</h2>
 
-    <p>Applications in <code>tests/</code>, for the questions a simulator cannot answer: what the real
-       part does with a command the simulator only pretends to implement, what its on-die ECC does to bytes
-       the log wants to read or write, how long any of it takes, and whether the durability contract holds
-       when the power really goes. The benchmark has run on three boards with the Alliance part, and the soak
-       through 116 power cuts made by hand on one of them; the interrupt test and the unattended soaks have not run
-       yet, and the Winbond driver has not run on silicon (<code>tests/README.md</code> says which build ran
-       what).</p>
+    <p>The programs in <code>tests/</code> answer what a simulator cannot: what the real part does, how long it takes,
+       and whether the contract holds when the part is really interrupted. For how to build, run, and read each one,
+       see <a href="https://github.com/hedgetechllc/nandlog/blob/main/tests/README.md"><code>tests/README.md</code></a>.</p>
+
+    <p><strong>Status of 1.0 on hardware.</strong> The 1.0 library (source ID <code>98cedad0cec6</code>, code-identical
+       to the captured build <code>3cb579c85891</code>) has run on an Ambiq Apollo4 Plus (Cortex-M4F, 48&nbsp;MHz SPI,
+       on-die ECC on) with the Alliance AS5F18G04SND:</p>
+    <ul>
+      <li><code>nandlog_bench</code> measured the costs on the <a href="performance.html">Performance</a> page.</li>
+      <li><code>nandlog_interrupt</code> stopped programs and erases with the part's RESET command (<code>FFh</code>)
+          in 672 program trials and 42 erase trials. A RESET at 50&nbsp;&micro;s or later into a BLOCK ERASE never
+          shortened it: the block always finished erasing.</li>
+      <li>The unattended soak (<code>nandlog_selfcut</code> and <code>nandlog_selfcut_inject</code>) stopped its own
+          programs and erases at random with RESET and then reset the MCU, and <code>tests/powercut_check.py</code>
+          checked the contract at every boot. It passed 2,059 interrupted operations (1,579 programs and 480 erases)
+          over 1,443 verified boots with no violation. These included 8 injected program and erase failures, which
+          retired blocks and relocated the write head.</li>
+    </ul>
+    <p>A RESET-interrupted operation is a proxy for a brown-out, not a power cut, because the part stays powered.
+       The campaign that removes power from the board (<code>nandlog_powercut</code>, driven by a relay or a switched
+       USB hub) has not yet been run on 1.0. The Winbond W25N01GWZEIG driver has run only in the simulator, and
+       testing on Winbond silicon is still to come.</p>
 
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Test</th><th>Gates</th><th>Writes to the part</th></tr></thead>
+      <thead><tr><th>Source and build target</th><th>What it answers</th><th>Writes to the part</th></tr></thead>
       <tbody>
-        <tr><td><code>test_nandlog_partial_read.c</code></td><td>Column-addressed and short page reads</td><td>One scratch page</td></tr>
-        <tr><td><code>test_nandlog_page_copy.c</code></td><td><code>nandlog_chip_copy_page()</code></td><td>Three scratch blocks</td></tr>
-        <tr><td><code>test_nandlog_ecc_marker.c</code></td><td>Whether a bad-block marker can be written into the spare area at all</td><td>Four scratch blocks</td></tr>
-        <tr><td><code>test_nandlog_bench.c</code></td><td>Nothing: the measured figures for the part, the bus and every library call</td><td><strong>Erases the ring and the whole log region</strong></td></tr>
-        <tr><td><code>test_nandlog_powercut.c</code></td><td>Nothing: the durability contract under real power cuts, checked across boots by <code>tests/powercut_check.py</code></td><td>The log region, continuously</td></tr>
+        <tr><td><code>test_nandlog_partial_read.c</code><br><code>nandlog_reads</code></td><td>Do column-addressed and short page reads land where they claim? Header reads and the bad-block scan rest on them.</td><td>One scratch page</td></tr>
+        <tr><td><code>test_nandlog_page_copy.c</code><br><code>nandlog_copy</code></td><td>Does the internal page copy reproduce the source and leave its spare area behind?</td><td>Three scratch blocks</td></tr>
+        <tr><td><code>test_nandlog_ecc_marker.c</code><br><code>nandlog_marker</code></td><td>Can a bad-block mark be programmed into the spare area and read back?</td><td>Four scratch blocks</td></tr>
+        <tr><td><code>test_nandlog_bench.c</code><br><code>nandlog_bench</code></td><td>What each primitive and library call costs in time, operations, and bus bytes.</td><td><strong>Erases the ring and the whole log region</strong></td></tr>
+        <tr><td><code>test_nandlog_interrupt.c</code><br><code>nandlog_interrupt</code></td><td>What a program or erase stopped by RESET leaves on the part.</td><td>Six blocks mid-region, left erased</td></tr>
+        <tr><td><code>test_nandlog_powercut.c</code><br><code>nandlog_powercut</code>, <code>nandlog_selfcut</code>, <code>nandlog_selfcut_inject</code></td><td>Does the contract hold across power cuts, or across RESETs the firmware issues itself, with or without injected failures?</td><td>The log region, continuously</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>The first three work only in the top eight blocks of the reserve, which the log never places a page in,
-       and skip any block already retired. None touches the log region, the metadata ring, or the chip driver's
-       bad-block table. They are still write tests: run them on a development board. The last two write all
-       over the log; run them only on a board whose contents do not matter.</p>
+    <p>The first three work only in the top eight blocks of the reserve, which the log never places a page in, and
+       touch neither the log, the ring, nor the bad-block table. Run them in order on a development board, because
+       tests 2 and 3 read back through the primitive test 1 checks. The other three write all over the log, so run
+       them only on a board whose contents do not matter.</p>
 
     <div class="warn">
-      <p><strong>Run the read test before deploying a new chip driver.</strong> A wrong column byte order
-         does not fail loudly &mdash; it reads <code>0xFF</code> from the wrong place, the factory bad-block
-         scan concludes every block is good, and nothing is retired. The simulator cannot catch it, because
-         it decodes the column address the same way the driver encodes it.</p>
+      <p><strong>Run the read test before you trust a new chip driver.</strong> A wrong column byte order does not
+         fail loudly. It reads <code>0xFF</code> from the wrong place, the factory bad-block scan concludes that every
+         block is good, and nothing is retired. The simulator cannot catch it, because it decodes the column address
+         the same way the driver encodes it.</p>
     </div>
 
-    <p>Each test prints its own pass/fail verdict and a timing table. <code>tests/README.md</code> has the
-       build instructions and what each result means.</p>
+    <h2 id="parser">The reference parser</h2>
 
-    <h2>The reference parser</h2>
+    <p><code>tools/nandlog_parse.py</code> implements the <a href="format.html">on-flash and wire formats</a>
+       independently of the library. The device computes CRC-32 with the IEEE&nbsp;802.3 polynomial so that the
+       parser can verify it with <code>zlib.crc32</code> and nothing bespoke.</p>
 
-<pre><code>./tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
-./tools/nandlog_parse.py stream offload.bin --json
-./tools/nandlog_parse.py image  dump.bin --expect dump.bin.view</code></pre>
+<pre><code>python3 tools/nandlog_parse.py image  dump.bin --page-size 4096 --spare-size 256
+python3 tools/nandlog_parse.py stream offload.bin --json
+python3 tools/nandlog_parse.py image  dump.bin --expect dump.bin.view</code></pre>
 
-    <p>An independent implementation of the <a href="format.html">on-flash and wire formats</a>, written
-       separately from the library that produces them. The device computes CRC-32 with the IEEE&nbsp;802.3
-       polynomial precisely so the parser can verify it with <code>zlib.crc32</code> and nothing bespoke.</p>
+    <p>Use it to check a device's output end to end: if the parser and the device disagree, one of them is wrong.
+       <code>make</code> does exactly that with the suite's images, and the parser's verdict on every page must match
+       the library's.</p>
 
-    <p>Use it to check a device's output end to end: if the parser and the device ever disagree, one of them
-       is wrong. <code>make</code> does exactly that with the images the suite dumps, which hold a relocation,
-       its stale originals and a tombstone: the parser's verdict on every page must match the library's.</p>
+    <h2 id="limits">What host tests cannot tell you</h2>
 
-    <h2>What host tests cannot tell you</h2>
-
-    <p>Nothing about the real part's timing, its ECC, or the board. The simulator's torn-write, drift and ECC
-       models are chosen to be adversarial, not characterized against any part's silicon. In particular they
-       take a page that reads whole as committed &mdash; nothing in them makes a fully programmed cell drift
-       back &mdash; and nothing makes a page that read blank in every bit hold charge that a second program
-       would disturb. Those need the device tests above &mdash; the power-cut soak above all, whose results are
-       still to come &mdash; plus a deployment.</p>
+    <p>Some questions only hardware, or a deployment, can answer:</p>
+    <ul>
+      <li><strong>Timing, ECC, and the board.</strong> The simulator says nothing about them. The benchmark measures
+          timing on the Alliance part.</li>
+      <li><strong>The fault models.</strong> They are adversarial by design, not characterized against silicon. They
+          take a page that reads whole as committed: nothing in them makes a fully programmed cell drift back, or
+          makes a page that read blank in every bit hold charge that a second program would disturb.</li>
+      <li><strong>Power cuts.</strong> On hardware, RESET has so far stood in for a power cut. RESET stops the part
+          on a healthy supply, while a failing supply takes the part down with it. The campaign that removes power
+          from the board is still to come.</li>
+      <li><strong>Torn erases.</strong> The Alliance part always finished an erase that RESET interrupted
+          50&nbsp;&micro;s or more after it began, so the soak could not tear one. Torn erases are exercised only
+          in the simulator.</li>
+      <li><strong>The Winbond part.</strong> Its driver has run only in the simulator.</li>
+      <li><strong>The long run.</strong> No test here covers retention over months, temperature, or wear over a
+          part's life. Only a deployment shows them.</li>
+    </ul>
