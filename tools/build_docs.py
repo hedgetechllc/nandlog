@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Assemble docs/*.html from the body fragments in tools/doc_pages/, so every page shares one
-shell and one navigation list. Run from anywhere:  python3 tools/build_docs.py"""
+shell and one navigation list. The version shown is read from nandlog.h, so a change to the docs never touches
+it. Run from anywhere:  python3 tools/build_docs.py"""
 import os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,7 +34,7 @@ SHELL = """<!DOCTYPE html>
 <a class="skip" href="#content">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="index.html">nandlog</a>
-  <span class="ver">v1.0</span>
+  <span class="ver">v{version}</span>
   <input type="checkbox" id="navtoggle" hidden>
   <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
   <nav class="sidenav">{nav}</nav>
@@ -60,7 +61,14 @@ def nav_html(current):
         items.append(f'<a href="{href}"{cls}>{label}</a>')
     return "\n    " + "\n    ".join(items) + "\n  "
 
+def library_version():
+    header = open(os.path.join(ROOT, "nandlog.h")).read()
+    major = re.search(r"#define\s+NANDLOG_VERSION_MAJOR\s+(\d+)", header).group(1)
+    minor = re.search(r"#define\s+NANDLOG_VERSION_MINOR\s+(\d+)", header).group(1)
+    return f"{major}.{minor}"
+
 def build():
+    version = library_version()
     os.makedirs(OUT, exist_ok=True)
     built = []
     for href, label in NAV:
@@ -72,7 +80,7 @@ def build():
         m = re.match(r"<!--\s*title:\s*(.*?)\s*\|\s*desc:\s*(.*?)\s*-->\s*", raw, re.S)
         title, desc = (m.group(1), m.group(2)) if m else (label, "nandlog documentation")
         body = raw[m.end():] if m else raw
-        html = SHELL.format(title=title, desc=desc, nav=nav_html(href), body=body.rstrip() + "\n")
+        html = SHELL.format(title=title, desc=desc, version=version, nav=nav_html(href), body=body.rstrip() + "\n")
         open(os.path.join(OUT, href), "w").write(html)
         built.append(href)
     open(os.path.join(OUT, ".nojekyll"), "w").write("")

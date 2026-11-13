@@ -8,9 +8,7 @@ tag, or a logger. Writes are small and frequent, reads are rare and bulk, and po
 
 - **Static allocation only.** About 16 KB of RAM on a 4 KB-page part, fixed at compile time.
 - **Durable once committed.** Once the call that commits a page returns, every record in that page survives a
-  power cut at any later instant. A simulator has checked this at every program and erase, and an unattended soak
-  on an Alliance NAND memory part has passed 2,059 interrupted operations without a violation
-  ([details](#what-survives-a-power-cut)).
+  power cut at any later instant ([details](#what-survives-a-power-cut)).
 - **Bad-block tolerant.** A block that refuses a program or an erase is retired, and its pages are moved and
   verified. The bad-block table survives a power cut at any instant, and if its reserve fails, it moves into the log
   region or falls back to using the blocks' own marks.
@@ -57,6 +55,15 @@ Any other part needs a new driver, which amounts to adding one `.c` file. See [A
 ```c
 #include "nandlog.h"
 
+// Your own types. The log stores both as opaque bytes and never interprets them
+typedef struct { uint32_t device_id, start_time; } my_details_t;  // describes an epoch, up to 512 bytes by default
+typedef struct { int16_t x, y, z; } my_sample_t;                  // the payload of one record
+#define RECORD_SAMPLE  1                                          // a record type of your choosing, 0 to 255
+
+my_details_t my_details = { .device_id = 42, .start_time = 1767225600 };
+my_sample_t sample = { .x = 12, .y = -3, .z = 980 };
+uint32_t milliseconds = 0;                                        // any clock you like; the log only compares it
+
 // Check whether the part is present and answers
 if (!nandlog_init())
    return;
@@ -81,7 +88,7 @@ uint8_t page[NANDLOG_MAX_DATA_BYTES_PER_PAGE];
 uint32_t num_pages = 0;
 
 nandlog_begin_session();
-nandlog_begin_reading(start_ms, end_ms);     // 0 for either bound means "no bound"
+nandlog_begin_reading(0, 0);                 // a time window; 0 for either bound means "no bound"
 nandlog_read_span(&num_pages, NULL);         // pass NULL unless you need an exact byte total
 
 for (uint32_t i = 0; i < num_pages; ++i)
@@ -98,6 +105,13 @@ nandlog_end_session();
 
 A **session** keeps the part powered across a run of operations. Reading and beginning an epoch require one, but
 logging does not. An **epoch** is one generation of the log, and a read covers one epoch at a time.
+
+Every record carries a one-byte type and a 32-bit **timestamp** that you supply. The log reads no clock and never
+interprets the timestamp, so its units and starting point are yours (for example, milliseconds since boot or Unix
+seconds). Each page header records the smallest and largest timestamps in its page, and `nandlog_begin_reading()`
+uses them to select a time window. A record whose timestamp steps back by more than
+`NANDLOG_TIMESTAMP_TOLERANCE_MS` commits the current page first, so a clock that resets or resynchronizes never
+mixes two time bases in one page. A record with no meaningful time can carry `NANDLOG_NO_TIMESTAMP`.
 
 While a read is open, a record that would commit a page is refused with `NANDLOG_ERR_READING`. To keep logging
 through a long download, take the read's first `header.seq` and page count, close it, and fetch each page with
@@ -275,9 +289,9 @@ that run on real hardware ([tests/README.md](tests/README.md)). The
 ```
 
 This is version 1.0. The major number changes when something you built against must change, and the minor number
-changes for additions, which `NANDLOG_VERSION_AT_LEAST(major, minor)` tests for. `NANDLOG_FORMAT_VERSION` versions
-what the library writes on the part, separately from the library itself. It is 1, and every metadata slot records
-it.
+changes for additions, which `NANDLOG_VERSION_AT_LEAST(major, minor)` tests for. A change to the documentation
+alone, including this README, does not change the version. `NANDLOG_FORMAT_VERSION` versions what the library writes
+on the part, separately from the library itself. It is 1, and every metadata slot records it.
 
 ## License
 

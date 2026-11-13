@@ -211,10 +211,19 @@ if (status != NANDLOG_OK)
       NANDLOG_ERR_TOO_LARGE: the record can never fit in a page. */
 }</code></pre>
 
-    <p>The record type and the data are opaque to the log. The timestamp is only ever compared, never
-       interpreted, so its epoch and units are yours. You may ignore the status, since
+    <p>The record type and the data are opaque to the log. You may ignore the status, since
        <code>nandlog_get_stats()</code> counts refused records either way. The
        <a href="api.html#writing">API Reference</a> lists every status.</p>
+
+    <p><strong>Timestamps.</strong> Every record carries a 32-bit timestamp that you supply. The log reads no
+       clock and never interprets the value, so its units and starting point are yours (for example,
+       milliseconds since boot or Unix seconds). Each page header records the smallest and largest timestamps in
+       its page, and a read uses them to select a time window (Section&nbsp;7). Records need not arrive in time
+       order. A step back of up to <code>NANDLOG_TIMESTAMP_TOLERANCE_MS</code>, in your units, stays in the same
+       page as stamped, which suits records from several sources whose clocks disagree slightly. A larger step
+       means the time base moved, as after a clock reset, so the log commits the current page first and never
+       mixes two time bases in one page. A record with no meaningful time can carry
+       <code>NANDLOG_NO_TIMESTAMP</code>.</p>
 
     <p>Records collect in a page in RAM. Most calls only copy the record, but the call that finds the page full
        commits it to flash first. On the Alliance part, storing a 32-byte record takes about 17&nbsp;&micro;s, and

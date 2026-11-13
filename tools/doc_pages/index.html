@@ -94,6 +94,7 @@
         <tr><td>Corruption detection</td><td>Separate CRC-32s over each page header and payload, and every commit read back and compared byte for byte.</td></tr>
         <tr><td>Bad-block handling</td><td>A block that refuses a program or an erase is retired, and its pages are moved and verified. The bad-block table survives a power cut at any instant (<a href="durability.html#bad-blocks">details</a>).</td></tr>
         <tr><td>Fast recovery</td><td>A warm boot of the 8&nbsp;Gbit Alliance part takes 82&ndash;89&nbsp;ms with 35 blocks in its bad-block table. The search for the write head stays correct with retired blocks, unreadable pages, and torn writes in the epoch.</td></tr>
+        <tr><td>Timestamped records</td><td>Every record carries a 32-bit timestamp you supply, in your own units. The log reads no clock, and reads select pages by time window (<a href="getting-started.html#logging">details</a>).</td></tr>
         <tr><td>Bulk offload</td><td>Time-bounded reads, a framed wire format with a CRC on every page, and per-page retransmission.</td></tr>
         <tr><td>Multiple generations</td><td>Epochs. An earlier epoch stays readable until the write head sweeps over it.</td></tr>
         <tr><td>Bounded work</td><td>Every search loop has a stated bound, so a failing part cannot stall the calling task indefinitely.</td></tr>
