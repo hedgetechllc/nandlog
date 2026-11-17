@@ -18,8 +18,9 @@
 
     <p>The simulator checks this contract at every program and erase of its test traces. On the Alliance
        AS5F18G04SND, an unattended soak stopped 2,059 of the 1.0 library's programs and erases with the RESET
-       command, with no violation over 1,443 verified boots. RESET is a proxy for a brown-out, not a power cut.
-       Tests that remove power from the board, and any testing on Winbond silicon, are still to come.</p>
+       command, with no violation over 1,443 verified boots. On the Winbond W25N01GWZEIG, a soak of the 1.1 library
+       stopped 2,017 programs and erases and found one violation, a residual second program (below). RESET is a proxy for a brown-out,
+       not a power cut, and tests that remove power from the board are still to come.</p>
 
     <p>If you are deciding whether to use the library, read <a href="#contract">The contract</a> and
        <a href="#limits">Where the guarantee ends</a>, and leave the rest for when you integrate it.</p>
@@ -108,7 +109,9 @@
       <li>A boot that finds such a page at the write head programs it again. That happens when a power cut stopped
           a program before it changed a bit, when the part refused a program without changing a bit and the slot
           recording the refusal was lost, or when a torn page drifted back to erased before the next boot listed
-          it. These are the <strong>residual second programs</strong>.</li>
+          it. These are the <strong>residual second programs</strong>. On the Winbond part, a program stopped
+          within its first 20&nbsp;&micro;s leaves the page reading erased in every bit, and in its soak one such page,
+          programmed again, read back whole at the commit and was unreadable a boot later.</li>
       <li>In the log region, each one lands on the page at the write head, which no read has served.
           <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code> rules them out there, at a cost paid at every boot
           (<a href="getting-started.html#pass-over-head">choosing it</a>).</li>
@@ -326,6 +329,6 @@
 
     <p>RESET is a proxy for a brown-out, not a power cut. The campaign that removes power from the board
        (<code>nandlog_powercut</code>, driven by a relay or a switched USB hub) has not yet been run on 1.0, and
-       because the part always finishes an erase after RESET, torn erases are exercised only in the simulator. The
-       Winbond W25N01GWZEIG driver has run only in the simulator, and hardware testing on Winbond silicon is still
-       to come.</p>
+       because the Alliance part always finishes an erase after RESET, its soak tears none. The Winbond W25N01GWZEIG
+       tears an erase stopped about 50&nbsp;&micro;s in, and its soak cut some there (see
+       <a href="testing.html#hardware">Testing</a>).</p>

@@ -2,7 +2,7 @@
 //
 // *****************************************************************************************************************
 // ***  DESTRUCTIVE.  THIS PROGRAM PROGRAMS AND ERASES SIX BLOCKS IN THE MIDDLE OF THE LOG REGION, FROM BLOCK    ***
-// ***  2000 UP, ABOUT 35 TIMES EACH, AND LEAVES THEM ERASED.  WHATEVER THE LOG HELD IN THEM IS GONE.            ***
+// ***  2000 UP (500 ON THE WINBOND PART), ABOUT 35 TIMES EACH, AND LEAVES THEM ERASED.  WHAT THEY HELD IS GONE. ***
 // ***  RUN IT ON A DEVELOPMENT BOARD ONLY -- NEVER ON A DEVICE HOLDING DATA YOU WANT.                           ***
 // *****************************************************************************************************************
 //
@@ -47,8 +47,9 @@
 //        the residual-risk event, and the line that matters most.
 //   E  ERASE SWEEP. First each block filled and erased to completion INTR_REFERENCE_ROUNDS times, timed, as the
 //      reference. Then for each of 14 nominal delays from 0 to 5,000 us -- a full block's erase took 2.7-3.4 ms on
-//      the bench -- three blocks, each: erased; filled with 64 patterned pages; WRITE ENABLE; BLOCK ERASE; the
-//      delay; RESET; poll; every page read raw (bits programmed; erased in every bit?) and with ECC on (status);
+//      the bench; on the Winbond part, 16 from 0 to 1,000 us around its 0.5 ms -- three blocks, each: erased;
+//      filled with 64 patterned pages; WRITE ENABLE; BLOCK ERASE; the delay; RESET; poll; every page read raw (bits
+//      programmed; erased in every bit?) and with ECC on (status);
 //      then, WITHOUT erasing again, a pattern programmed into the first page and into the last, each read back with
 //      ECC on (status, match) and raw; then the block erased to completion again.
 //   F  every block erased once more and every page of it read raw, to show it left erased; the reference busy times.
@@ -98,8 +99,9 @@
 //    INTR_ERROR ...       INTR_DONE errors=<n> aborted=<0|1> ... elapsed_s=<s>
 //
 // <status> is none, corrected, uncorrectable or limit (ECCS 00b, 01b, 10b, 11b: limit is corrected with the error
-// count at the ECC's maximum). class: blank is every bit of main and spare erased; complete is the main array reading
-// the pattern bit for bit; partial is anything else. flips is the most bits the second or third raw read differs from
+// count at the ECC's maximum; the Winbond part's 11b is uncorrectable, and reported so). class: blank is every bit
+// of main and spare erased; complete is the main array reading the pattern bit for bit; partial is anything else.
+// flips is the most bits the second or third raw read differs from
 // the first by; unstable is flips > 0. In INTR_ERASE, zeros are the bits reading 0 in each page's main and spare,
 // raw, and ecc_map each page's ECCS read with ECC on; ecc_ff counts the pages whose main array read all FFh with ECC
 // on. first_ and last_ are the weak-erase programs into pages 0 and 63, first_blank saying whether the page read
@@ -113,7 +115,9 @@
 #include "nandlog_hw_test.h"
 
 
-// Alliance AS5F18G04SND Command Set, Below the Driver -----------------------------------------------------------------
+// SPI NAND Command Set, Below the Driver ------------------------------------------------------------------------------
+
+// The Alliance AS5F18G04SND and the Winbond W25N01GWZEIG agree on every command, register and address used here
 
 #define CMD_READ_ID                                 0x9F
 #define CMD_RESET                                   0xFF
@@ -140,12 +144,12 @@
 #define ECCS_NONE                                   0
 #define ECCS_UNCORRECTABLE                          2
 
-// The part this was written for, which the run checks before it touches a block. Fixed rather than read from the
-// geometry so that the buffers and the per-page records below can be sized at compile time
-#define PART_PAGE_BYTES                             4096
-#define PART_SPARE_BYTES                            256
+// The run picks its part from the geometry before it touches a block; the buffers fit the larger of the two
+#define MAX_RAW_WORDS                               ((4096 + 256) / 4)
+#define MAX_MAIN_WORDS                              (4096 / 4)
 #define PART_PAGES_PER_BLOCK                        64
-#define PART_RAW_BYTES                              (PART_PAGE_BYTES + PART_SPARE_BYTES)
+#define PART_PAGE_BYTES                             (part->page_bytes)
+#define PART_RAW_BYTES                              (part->page_bytes + part->spare_bytes)
 #define PART_RAW_WORDS                              (PART_RAW_BYTES / 4)
 #define PART_MAIN_WORDS                             (PART_PAGE_BYTES / 4)
 
@@ -156,7 +160,7 @@
 // INTR_CANDIDATE_BLOCKS. The run refuses a range that reaches down into the metadata ring (nandlog.c's first
 // INTR_RING_BLOCKS blocks of the array), or up into the reserve or the INTR_TABLE_REACH_BLOCKS at the top of the array
 // that the driver may be given for its bad-block table (its NANDLOG_CHIP_TABLE_SEARCH_BLOCKS)
-#define INTR_FIRST_BLOCK                            2000
+#define INTR_FIRST_BLOCK                            (part->first_block)
 #define INTR_CANDIDATE_BLOCKS                       32
 #define INTR_BLOCKS                                 6
 #define INTR_RING_BLOCKS                            8
@@ -168,10 +172,14 @@ static const uint32_t program_delays_us[] = { 0, 5, 10, 20, 35, 50, 75, 100, 150
                                               600, 650, 700, 1000 };
 #define INTR_PAGES_PER_PROGRAM_DELAY                32
 
-// The erase sweep: nominal delays across and past the 2.7-3.4 ms a full block's erase took on the bench, and how many
-// blocks each is tried on; and how many times each block is filled and erased whole first, as the reference
+// The erase sweep: nominal delays across and past a full block's erase, 2.7-3.4 ms on the Alliance part and about
+// 0.5 ms on the Winbond one, and how many blocks each is tried on; and how many times each block is filled and erased
+// whole first, as the reference
 #define INTR_BLOCKS_PER_ERASE_DELAY                 3
-static const uint32_t erase_delays_us[] = { 0, 50, 150, 300, 600, 1000, 1500, 2000, 2500, 2800, 3100, 3400, 4000, 5000 };
+static const uint32_t alliance_erase_delays_us[] = { 0, 50, 150, 300, 600, 1000, 1500, 2000, 2500, 2800, 3100, 3400,
+                                                     4000, 5000 };
+static const uint32_t winbond_erase_delays_us[] = { 0, 25, 50, 75, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600,
+                                                    800, 1000 };
 #define INTR_REFERENCE_ROUNDS                       2
 
 #define INTR_REFERENCE_SAMPLES                      512      // reservoir behind a reference median
@@ -183,11 +191,26 @@ static const uint32_t erase_delays_us[] = { 0, 50, 150, 300, 600, 1000, 1500, 20
 
 #define COUNT_OF(array)                             (sizeof(array) / sizeof((array)[0]))
 
+typedef struct
+{
+   const char *name;
+   uint32_t page_bytes, spare_bytes, first_block;
+   bool eccs_3_uncorrectable;    // 11b is corrected at the limit on the Alliance part, uncorrectable on the Winbond one
+   const uint32_t *erase_delays_us;
+   uint32_t erase_delay_count;
+} part_t;
+
+static const part_t parts[] = {
+   { "AS5F18G04SND", 4096, 256, 2000, false, alliance_erase_delays_us, COUNT_OF(alliance_erase_delays_us) },
+   { "W25N01GWZEIG", 2048, 64, 500, true, winbond_erase_delays_us, COUNT_OF(winbond_erase_delays_us) },
+};
+static const part_t *part = &parts[0];
+
 
 // Static Buffers ------------------------------------------------------------------------------------------------------
 
 // Word-aligned, so the bit counts below go a word at a time over buffers whose lengths are whole words
-static uint32_t pattern_words[PART_MAIN_WORDS], first_words[PART_RAW_WORDS], again_words[PART_RAW_WORDS];
+static uint32_t pattern_words[MAX_MAIN_WORDS], first_words[MAX_RAW_WORDS], again_words[MAX_RAW_WORDS];
 static uint8_t *const pattern = (uint8_t*)pattern_words;
 static uint8_t *const first_read = (uint8_t*)first_words, *const again_read = (uint8_t*)again_words;
 
@@ -488,7 +511,8 @@ static uint32_t read_with_ecc(uint32_t page, uint8_t *buffer)
    static const uint8_t column_zero[3] = { 0x00, 0x00, 0x00 };
    const uint8_t status = latch(page);
    port_read(CMD_READ, column_zero, sizeof(column_zero), buffer, PART_PAGE_BYTES);
-   return (uint32_t)(status >> SR_ECC_SHIFT) & 3u;
+   const uint32_t eccs = (uint32_t)(status >> SR_ECC_SHIFT) & 3u;
+   return (part->eccs_3_uncorrectable && (eccs == 3u)) ? ECCS_UNCORRECTABLE : eccs;
 }
 
 
@@ -1019,7 +1043,8 @@ static void line_weak(line_t *out, const char *prefix, const weak_t *weak)
 
 static void erase_trial(uint32_t delay_index, uint32_t block, erase_summary_t *summary)
 {
-   const uint32_t first_page = block * PART_PAGES_PER_BLOCK, nominal_us = erase_delays_us[delay_index], trial = erase_trials++;
+   const uint32_t first_page = block * PART_PAGES_PER_BLOCK, nominal_us = part->erase_delays_us[delay_index];
+   const uint32_t trial = erase_trials++;
    uint32_t busy = 0;
    if (!erase_fully(block, &busy))
    {
@@ -1134,9 +1159,9 @@ static void erase_sweep(void)
       }
    print("  reference: %u full-block erases and %u page programs timed\n", erase_reference.n, program_reference.n);
    print("  %u delays x %u blocks, each block erased, filled, its erase stopped, read, test-programmed and erased\n",
-         (uint32_t)COUNT_OF(erase_delays_us), (uint32_t)INTR_BLOCKS_PER_ERASE_DELAY);
+         part->erase_delay_count, (uint32_t)INTR_BLOCKS_PER_ERASE_DELAY);
 
-   for (uint32_t d = 0; d < COUNT_OF(erase_delays_us); ++d)
+   for (uint32_t d = 0; d < part->erase_delay_count; ++d)
    {
       erase_summary_t summary;
       memset(&summary, 0, sizeof(summary));
@@ -1146,7 +1171,7 @@ static void erase_sweep(void)
 
       line_t *out = &line;
       line_reset(out);
-      line_key_u32(out, "INTR_ERASE_SUM nominal_us=", erase_delays_us[d]);
+      line_key_u32(out, "INTR_ERASE_SUM nominal_us=", part->erase_delays_us[d]);
       line_key_u32(out, " n=", summary.n);
       line_spans(out, &summary.spans, summary.n);
       line_key_u32(out, " not_ready=", summary.not_ready);
@@ -1235,6 +1260,7 @@ static void print_header(void)
    line_key_str(out, " source=", NANDLOG_SOURCE_ID);
    line_key_hex(out, " part_id=", ((uint32_t)id[0] << 16) | ((uint32_t)id[1] << 8) | id[2], 6);
    line_key_hex(out, " device_id=", device, 2);
+   line_key_str(out, " part=", part->name);
    line_key_u32(out, " page=", geometry->page_size_bytes);
    line_key_u32(out, " spare=", geometry->spare_size_bytes);
    line_key_u32(out, " pages_per_block=", geometry->pages_per_block);
@@ -1253,10 +1279,10 @@ static void print_header(void)
    }
    line_key_u32(out, " pages_per_delay=", INTR_PAGES_PER_PROGRAM_DELAY);
    line_str(out, " erase_delays_us=");
-   for (uint32_t d = 0; d < COUNT_OF(erase_delays_us); ++d)
+   for (uint32_t d = 0; d < part->erase_delay_count; ++d)
    {
       line_str(out, d ? "," : "");
-      line_u32(out, erase_delays_us[d]);
+      line_u32(out, part->erase_delays_us[d]);
    }
    line_key_u32(out, " blocks_per_delay=", INTR_BLOCKS_PER_ERASE_DELAY);
    line_print(out);
@@ -1290,8 +1316,7 @@ int main(void)
 
    print("\n============================================================\n");
    print("nandlog on-device characterization: interrupted program and erase\n");
-   print("*** DESTRUCTIVE: PROGRAMS AND ERASES %u BLOCKS OF THE LOG REGION FROM BLOCK %u ***\n", (uint32_t)INTR_BLOCKS,
-         (uint32_t)INTR_FIRST_BLOCK);
+   print("*** DESTRUCTIVE: PROGRAMS AND ERASES %u BLOCKS IN THE MIDDLE OF THE LOG REGION ***\n", (uint32_t)INTR_BLOCKS);
    print("Expected run time: under a minute. It ends with INTR_DONE.\n");
    print("============================================================\n");
    if (!cycles_per_us)
@@ -1314,12 +1339,17 @@ int main(void)
    system_enable_interrupts(true);
 
    const nandlog_geometry_t *geometry = nandlog_chip_geometry();
-   if ((geometry->page_size_bytes != PART_PAGE_BYTES) || (geometry->spare_size_bytes != PART_SPARE_BYTES) ||
-       (geometry->pages_per_block != PART_PAGES_PER_BLOCK))
+   const part_t *found = NULL;
+   for (uint32_t i = 0; i < COUNT_OF(parts); ++i)
+      if ((geometry->page_size_bytes == parts[i].page_bytes) && (geometry->spare_size_bytes == parts[i].spare_bytes) &&
+          (geometry->pages_per_block == PART_PAGES_PER_BLOCK))
+         found = &parts[i];
+   if (!found)
    {
-      intr_error("this is not the 4,096+256-byte, 64-page part the test was written for; nothing written", 0);
+      intr_error("this is neither of the 64-page parts the test was written for; nothing written", 0);
       halt();
    }
+   part = found;
    print_header();
    check_ecc_switch();
    choose_blocks();

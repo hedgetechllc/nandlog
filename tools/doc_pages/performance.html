@@ -1,4 +1,4 @@
-<!-- title: Performance | desc: What each nandlog operation costs in flash operations and RAM, with measured figures from a 4 KB-page part. -->
+<!-- title: Performance | desc: What each nandlog operation costs in flash operations and RAM, with measured figures from both supported parts. -->
 <h1>Performance</h1>
     <p class="lede">What each call costs in flash operations, in time on a real board, and in RAM. Read this page
        to size a system around nandlog.</p>
@@ -20,6 +20,17 @@
       <li>Serving a page takes about 1.1&nbsp;ms, and resolving a time bound about 0.3&nbsp;ms for each page of the
           epoch it reads.</li>
       <li>The library and the Alliance driver use 16.4&nbsp;KB of static RAM, and nothing is allocated.</li>
+    </ul>
+
+    <p>With the Winbond W25N01GWZEIG (2&nbsp;KB pages, 1,024 blocks) and the 1.1 library on the same MCU:</p>
+
+    <ul>
+      <li>A <code>nandlog_store_record()</code> that commits a 2&nbsp;KB page takes 1.4&ndash;1.6&nbsp;ms, and an
+          erase ahead of the write head 0.7&nbsp;ms.</li>
+      <li>A warm boot takes 23&ndash;29&nbsp;ms.</li>
+      <li>Serving a page takes about 0.6&nbsp;ms, 3.3&nbsp;MB/s of payload, and resolving a time bound about
+          0.2&nbsp;ms for each page of the epoch it reads.</li>
+      <li>Beginning an epoch takes 5&nbsp;ms, or 190&nbsp;ms the first time on a part whose ring holds no slot.</li>
     </ul>
 
     <p>Every loop has a stated bound, so a part that stops working ends in <code>nandlog_port_unwritable()</code> or
@@ -370,7 +381,7 @@
         <tr><td><code>flush(true)</code> of a 156-byte partial page</td><td>2,086&nbsp;&micro;s</td><td>2,091&nbsp;&micro;s</td></tr>
         <tr><td><code>flush(false)</code> with nothing due</td><td>4.3&nbsp;&micro;s</td><td>4.9&nbsp;&micro;s</td></tr>
         <tr><td><code>begin_epoch()</code></td><td>8.2&nbsp;ms, or 9.9&nbsp;ms entering a ring block</td><td>10.6&nbsp;ms</td></tr>
-        <tr><td><code>begin_epoch()</code>, the first on a part with no slot</td><td>About 1.1&nbsp;s, estimated: 4,066 header reads at 279&nbsp;&micro;s each</td><td>&mdash;</td></tr>
+        <tr><td><code>begin_epoch()</code>, the first on a part with no slot</td><td>About 1.1&nbsp;s, estimated: 4,066 header reads at 279&nbsp;&micro;s each. On the Winbond part's 1,024 blocks, 190&nbsp;ms measured</td><td>&mdash;</td></tr>
       </tbody>
     </table>
     </div>

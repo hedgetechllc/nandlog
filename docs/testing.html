@@ -58,8 +58,9 @@
     <p>A simulator shows that the logic holds under every fault it models. It cannot show what a real part does:
        its timing, its ECC, or what an interrupted operation leaves in its cells. On an Ambiq Apollo4 Plus with the
        Alliance AS5F18G04SND, an unattended soak of the 1.0 library stopped 2,059 operations with the part's RESET
-       command and found no violation over 1,443 verified boots. Removing power from the board is still to come, and
-       the Winbond driver has run only in the simulator.</p>
+       command and found no violation over 1,443 verified boots. With the Winbond W25N01GWZEIG, a soak of the 1.1 library
+       stopped 2,017 operations and found one violation, a residual second program (see <a href="#hardware">On-device
+       tests</a>). Removing power from the board is still to come.</p>
 
     <p>For the hardware status, read <a href="#hardware">On-device tests</a> and <a href="#limits">What host tests
        cannot tell you</a>. The other sections say what each host check does and how to run it.</p>
@@ -360,10 +361,28 @@ make baselines    # comparison with Dhara and littlefs</code></pre>
           over 1,443 verified boots with no violation. These included 8 injected program and erase failures, which
           retired blocks and relocated the write head.</li>
     </ul>
+    <p><strong>Status of 1.1 on the Winbond part.</strong> The 1.1 library (source ID <code>7b01cef16c23</code>) has run
+       on the same MCU with the Winbond W25N01GWZEIG, on a SociTrack revision M board:</p>
+    <ul>
+      <li>Tests 1 and 2 passed, the second run of test 2 after a power cycle. Test 3 does not apply, because the part
+          retires blocks through its own remap table rather than a mark.</li>
+      <li><code>nandlog_bench</code> ran clean twice. A header read costs 177&nbsp;&micro;s and a whole-page read
+          512&nbsp;&micro;s, a commit 1.4&ndash;1.6&nbsp;ms, and a full block's erase 0.7&nbsp;ms.</li>
+      <li><code>nandlog_interrupt</code> ran 672 program trials and 48 erase trials. A program stopped within its
+          first 20&nbsp;&micro;s left the page reading erased in every bit, 127 times in 127, and a second program
+          over such a page read back clean every time. An erase stopped at 50&nbsp;&micro;s left 2 or 3 of a block's
+          64 pages unerased, a torn erase; stopped at 75&nbsp;&micro;s or later, it always finished.</li>
+      <li>The soak stopped 2,017 operations over 1,432 verified boots, with 2 injected program failures
+          that retired blocks and relocated the write head. It found one violation: a
+          program stopped 23&nbsp;&micro;s in left its page reading erased, the next boot took that page for the write
+          head and programmed it again, the page read back whole, and a boot later it was unreadable, losing an
+          acknowledged record. That is a residual second program, the limit
+          <a href="durability.html#limits">Durability</a> describes, and
+          <code>NANDLOG_PASS_OVER_HEAD_AT_BOOT</code> rules it out.</li>
+    </ul>
     <p>A RESET-interrupted operation is a proxy for a brown-out, not a power cut, because the part stays powered.
        The campaign that removes power from the board (<code>nandlog_powercut</code>, driven by a relay or a switched
-       USB hub) has not yet been run on 1.0. The Winbond W25N01GWZEIG driver has run only in the simulator, and
-       testing on Winbond silicon is still to come.</p>
+       USB hub) has not yet been run on either part.</p>
 
     <div class="tablewrap">
     <table>
@@ -418,9 +437,11 @@ python3 tools/nandlog_parse.py image  dump.bin --expect dump.bin.view</code></pr
           on a healthy supply, while a failing supply takes the part down with it. The campaign that removes power
           from the board is still to come.</li>
       <li><strong>Torn erases.</strong> The Alliance part always finished an erase that RESET interrupted
-          50&nbsp;&micro;s or more after it began, so the soak could not tear one. Torn erases are exercised only
-          in the simulator.</li>
-      <li><strong>The Winbond part.</strong> Its driver has run only in the simulator.</li>
+          50&nbsp;&micro;s or more after it began, so its soak could not tear one. The Winbond part tears an erase
+          stopped about 50&nbsp;&micro;s in, and 20 of its soak's 230 erase cuts landed between 25 and
+          75&nbsp;&micro;s.</li>
+      <li><strong>The Winbond part's remap table.</strong> The soak wrote entries to it, but no cut landed in one, so
+          that an entry is written whole or not at all across a cut is still assumed.</li>
       <li><strong>The long run.</strong> No test here covers retention over months, temperature, or wear over a
           part's life. Only a deployment shows them.</li>
     </ul>

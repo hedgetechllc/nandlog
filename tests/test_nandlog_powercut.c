@@ -329,8 +329,12 @@ static void line_emit(void)
 #define PC_STATUS_P_FAIL                            0x08
 #define PC_TABLE_MAGIC                              "BBT3"         // the Alliance driver's table pages begin with this
 
+#ifndef PC_PROGRAM_BUSY_US
 #define PC_PROGRAM_BUSY_US                          620            // a page program on the AS5F18G04SND, as measured
+#endif
+#ifndef PC_ERASE_BUSY_US
 #define PC_ERASE_BUSY_US                            3400           // a full block's erase on it, likewise
+#endif
 #define PC_RESET_TIMEOUT_US                         100000         // far beyond any RESET this part performs
 #define PC_SWO_DRAIN_US                             2000           // after the ITM goes idle and before the MCU resets
 #define PC_IDLE_NAPS                                20             // 100 ms each: how long an idle boot waits to reset

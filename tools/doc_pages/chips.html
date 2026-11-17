@@ -14,8 +14,8 @@
 
     <p>The two handle bad blocks in opposite ways. The Alliance driver keeps its own table on the part, and the log
        steps over bad blocks where they lie. The Winbond driver hands each bad block to the part's built-in remap
-       table. The Alliance driver has run the 1.0 library on hardware. The Winbond driver has run only in the
-       simulator, and hardware testing on Winbond silicon is still to come.</p>
+       table. The Alliance driver has run the 1.0 library on hardware, and the Winbond driver the 1.1 library (see
+       <a href="testing.html#hardware">Testing</a>).</p>
 
     <p>To write a driver, read <a href="#geometry">Declare the geometry</a> and
        <a href="#functions">Implement the functions</a>, then <a href="#testing">Test the driver</a>. If your part has
@@ -287,8 +287,8 @@ const bool programmed = (wait_until_not_busy() &amp; STATUS_WRITE_FAILURE) != ST
         none, for blocks that fail in service.</li>
       <li>Once the part reports its table full, the driver returns false and the log stops taking pages
         (<code>NANDLOG_ERR_UNWRITABLE</code>).</li>
-      <li>The part must write an entry whole or not at all across a power cut. The simulator assumes it, and it has not
-        yet been checked on Winbond silicon.</li>
+      <li>The part must write an entry whole or not at all across a power cut. The simulator assumes it. The soak on
+        Winbond silicon wrote entries, but no cut landed in one, so it is not yet checked.</li>
     </ul>
 
     <p>What each strategy means for durability, including how the log checks the table against its own record at every

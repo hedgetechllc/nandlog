@@ -18,7 +18,16 @@ program trials and 42 erase trials, and a RESET 50 µs or more into a block eras
 soak, `nandlog_selfcut` followed by `nandlog_selfcut_inject`, stopped 2,059 programs and erases with RESET, including
 8 injected program and erase failures, and `powercut_check.py` found no violation over 1,443 verified boots. RESET
 stands in for a brown-out, not a power cut, so `nandlog_powercut` with power removed by a relay or a switched hub has
-not yet run on 1.0. The Winbond driver has run only in the simulator.
+not yet run on 1.0.
+
+The 1.1 library has run on the same MCU with the Winbond W25N01GWZEIG, on a SociTrack revision M board. Tests 1 and 2
+passed, test 3 does not apply (the part retires blocks through its own remap table), and the bench ran clean. On
+`nandlog_interrupt`, a program stopped within its first 20 µs left the page reading erased in every bit, 127 times in
+127, and an erase stopped about 50 µs in left the block torn. The soak stopped 2,017 programs and erases over 1,432 verified boots, with 2 injected program
+failures that retired blocks, and `powercut_check.py` found one violation: a page a program left reading erased was programmed again at the next boot,
+read back whole, and was unreadable a boot later. That is the residual second program the
+[durability page](https://hedgetechllc.github.io/nandlog/durability.html#limits) describes, which
+`NANDLOG_PASS_OVER_HEAD_AT_BOOT` rules out.
 
 The first three work only in the **top eight blocks of the reserve**, which the log never places a page in, using
 four of them and stepping over any that is factory-bad. None of them touches the log region, the metadata ring, or
@@ -91,7 +100,8 @@ Five parts. **1b and 1c are the ones that matter.**
 - **1c** the spare-area marker byte reads the same whether you address its column directly or drag the whole
   page along in front of it. This is run over **every block on the part**.
 - **1d** a page header reads correctly on its own, and the write head still recovers across a re-init — the
-  boot path is now entirely header-only reads.
+  boot path is now entirely header-only reads. A part with no epoch, such as one last written in format 1, gets one
+  begun first, since it takes no records without one.
 - **1e** boot cost, and a header read against a whole-page read.
 
 **Why this one is not optional.** A wrong column byte order does not fail loudly. It reads `0xFF` from the
@@ -143,7 +153,8 @@ page that is erased but for one spare byte, and no driver function exposes eithe
 that page from column 0, the whole page and spare area, `FFh` but for the mark: on the Alliance part a PROGRAM
 LOAD resets the cache register only from the column it starts at, so a one-byte load at the spare's column
 programs whatever the last page read left in the main area. The command codes at the top of the file are for
-the Alliance AS5F18G04SND; change them for another part.
+the Alliance AS5F18G04SND; change them for another part. The Winbond W25N01GWZEIG needs no marks, because its driver
+retires a block through the part's own remap table, so this test does not apply to it.
 
 | step | question |
 |---|---|
@@ -520,6 +531,15 @@ the run carries on. `powercut_check.py` checks the contract exactly as for hand 
 counts the `INJECT` lines and reports `retired=` from first boot to last. A retirement after an injection is the
 failure path doing its job, not a violation. Each boot's reset reason is a software reset, not `HW Power-On Reset`.
 
+**On the Winbond part.** The cut delays default to the Alliance part's busy times, a 620 µs program and a 3,400 µs
+erase. Give the Winbond part its own from the bench, or most erase cuts land after the erase has finished, and cap the
+injections: `PC_INJECT_RETIRED_CAP` counts every retired block the board starts with, and each retirement spends one of
+the part's 20 permanent remap entries.
+
+```
+make nandlog_selfcut_inject BOARD_REV=M EXTRA_DEFINES="-DPC_PROGRAM_BUSY_US=340 -DPC_ERASE_BUSY_US=500 -DPC_INJECT_RETIRED_CAP=<retired now + 2>"
+```
+
 **Running it.** One board, left powered. The battery can stay connected, since no supply is cut. Capture SWO
 exactly as for hand cuts, the viewer loop included, since the MCU resets at every cut. Then leave it. A boot takes
 from a tenth of a second (cut in `nandlog_init()`) to some tens of seconds (a full read-back, then a late cut), so
@@ -606,7 +626,10 @@ nandlog_interrupt: $(CONFIG) $(CONFIG)/test_nandlog_interrupt.o $(CONFIG)/nandlo
 $(CONFIG)/test_nandlog_interrupt.o: $(NANDLOG_ID_SOURCES)
 ```
 
-It is written for the AS5F18G04SND and checks the geometry before it writes anything. The board stays powered, with
+It runs on either supplied part. Before it writes anything it reads the geometry and picks that part's blocks, from
+block 2000 on the Alliance part and from 500 on the Winbond one, and its erase delays, 0 to 5 ms on the Alliance part
+and 0 to 1 ms around the Winbond part's 0.5 ms erase. On the Winbond part an ECC status of 11b is uncorrectable, and is
+reported so. The board stays powered, with
 the debugger attached (DWT has to count). Capture SWO to a file, as for the bench, and leave it until `INTR_DONE`:
 
 ```

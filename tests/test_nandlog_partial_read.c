@@ -164,22 +164,35 @@ static void test_page_header_only_read(void)
    // These go through nandlog.h, which manages the part's power for itself
    // Commit a real log page, then read only its header the way every boot and every bounded download now do
    nandlog_disable(false);
+   hw_power_up();
+   if (nandlog_epoch_count() == 0)
+   {
+      // A part with no epoch takes no records, and one written in an earlier format reads as having none
+      static const char details[] = "nandlog_reads 1d";
+      HW_CHECK(nandlog_begin_epoch(details, sizeof(details)), "the part has no epoch, and one could not be begun");
+      print("  the part had no epoch, so one was begun\n");
+   }
    hw_fill_pattern(region, 512, 0x5EED1234);
-   nandlog_store_record(1, 1000, region, 512);
-   nandlog_flush(true);
+   const nandlog_status_t stored = nandlog_store_record(1, 1000, region, 512), flushed = nandlog_flush(true);
+   HW_CHECK((stored == NANDLOG_OK) && (flushed == NANDLOG_OK), "the record was not committed (store %u, flush %u)",
+            (uint32_t)stored, (uint32_t)flushed);
 
    bool found = false;
    nandlog_page_header_t via_recent;
+   memset(&via_recent, 0, sizeof(via_recent));
    const uint32_t length = nandlog_read_recent_page(0, region, &via_recent, &found);
    HW_CHECK(length > 0, "the page just committed did not read back");
 
    // Same page, header only, straight off the chip
    const uint32_t page = via_recent.seq;   // only used for the message below
-   HW_CHECK(via_recent.magic == NANDLOG_PAGE_MAGIC_THIS_BUILD,
-            "the committed page announced magic %08X, not %08X (seq %u)",
-            via_recent.magic, (uint32_t)NANDLOG_PAGE_MAGIC_THIS_BUILD, page);
-   HW_CHECK(via_recent.payload_length == length, "header says %u payload bytes, the read gave %u",
-            via_recent.payload_length, length);
+   if (length)
+   {
+      HW_CHECK(via_recent.magic == NANDLOG_PAGE_MAGIC_THIS_BUILD,
+               "the committed page announced magic %08X, not %08X (seq %u)",
+               via_recent.magic, (uint32_t)NANDLOG_PAGE_MAGIC_THIS_BUILD, page);
+      HW_CHECK(via_recent.payload_length == length, "header says %u payload bytes, the read gave %u",
+               via_recent.payload_length, length);
+   }
 
    // And prove the boot path works end to end: re-initialising re-runs find_newest_metadata() and
    // recover_write_head(), both of which are now header-only reads
