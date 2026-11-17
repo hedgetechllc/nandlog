@@ -12,7 +12,7 @@
 <a class="skip" href="#content">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="index.html">nandlog</a>
-  <span class="ver">v1.0</span>
+  <span class="ver">v1.1</span>
   <input type="checkbox" id="navtoggle" hidden>
   <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
   <nav class="sidenav">
@@ -155,7 +155,7 @@ make baselines    # comparison with Dhara and littlefs</code></pre>
        backward time step, exact byte totals, and framed records. It also dumps an image with a relocation and a
        tombstone in it, for the parser.</p>
 
-    <p><strong>The regression tests</strong> (<code>sim/nandlog_sim_regress.c</code>) number 103 in the framed
+    <p><strong>The regression tests</strong> (<code>sim/nandlog_sim_regress.c</code>) number 108 in the framed
        Alliance build. By topic:</p>
     <ul>
       <li><strong>The write head</strong> (the next position the log will program) never moves for a fault anywhere
@@ -172,6 +172,10 @@ make baselines    # comparison with Dhara and littlefs</code></pre>
       <li><strong>With a dead reserve</strong>, the table moves below it once, and later boots find it cheaply. With
           nowhere for the table, a block's own mark retires it. With no free pair at all, the log stops and says
           so.</li>
+      <li><strong>Format 1's pages</strong>, left by 1.0 or earlier, are never adopted or counted as the new
+          epoch's, and a boot over them latches no more pages than one over erased blocks. After the whole ring is
+          lost, the next epoch is numbered above the pages before it, and an epoch begun on a part with a ring reads
+          no more than a handful of pages.</li>
       <li><strong>The <a href="format.html#layout">metadata ring</a></strong> survives torn, unreadable, and
           half-written slots, and a lost slot is recovered from the epoch's pages. A
           <a href="format.html#metadata-slot">sealed</a> epoch stays sealed, and a new epoch begun after it erases

@@ -151,6 +151,9 @@
           recorded may be programmed again if it reads blank.</li>
       <li>Pages of a newer epoch that a boot cannot place stop logging, and the next epoch begun is numbered past
           them.</li>
+      <li>If the whole ring is lost, the next epoch begun is numbered past every page left on the part, so the
+          epochs before it are never adopted or counted as its own. Pages of an earlier format belong to no epoch,
+          whatever their numbers.</li>
       <li>If both copies of the table's newest version are lost, the driver loads the version before it. If every
           version is lost, it rebuilds the table from the blocks' marks.</li>
     </ul>

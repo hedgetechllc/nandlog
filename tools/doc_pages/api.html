@@ -36,10 +36,11 @@
        <code>nandlog_port_unwritable()</code> with its lock held, so those must not call back into it.</p>
 
     <p>The lock is a single lock. As a result, a <code>nandlog_store_record()</code> that only copies into RAM
-       waits behind whatever holds it, and the longest holders are the calls that read across the epoch. On the
-       Alliance part, an end-bounded <code>nandlog_begin_reading()</code> over a 10,000-page epoch holds the lock
-       for 3.0&nbsp;s, and <code>nandlog_read_span()</code> with a byte total over 1,000 pages holds it for
-       1.0&nbsp;s. A logger that cannot wait that long should buffer its own records during a download (see
+       waits behind whatever holds it, and the longest holders are the calls that read across the epoch or the
+       part. On the Alliance part, an end-bounded <code>nandlog_begin_reading()</code> over a 10,000-page epoch
+       holds the lock for 3.0&nbsp;s, <code>nandlog_read_span()</code> with a byte total over 1,000 pages holds it
+       for 1.0&nbsp;s, and the first <code>nandlog_begin_epoch()</code> on a part with no slot holds it for about
+       1.1&nbsp;s. A logger that cannot wait that long should buffer its own records during a download (see
        <a href="performance.html#blocking">Performance</a>).</p>
 
     <p>A call made outside a session wakes the part for that call and puts it back to sleep afterwards. Pointer
@@ -125,8 +126,10 @@ void nandlog_end_session(void);</pre>
       <pre>bool nandlog_begin_epoch(const void *blob, uint16_t length);</pre>
       <p>Begin a new epoch, described by an opaque blob of at most <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>.
          The log stores the blob but never reads or interprets it. Records still buffered for the old epoch are
-         committed to it first. The new epoch is numbered above every epoch the ring has seen, starting from 1
-         on a fresh part.</p>
+         committed to it first. The new epoch is numbered above every epoch the ring has seen. On a part whose ring
+         holds no slot, a fresh one or one whose whole ring was lost, the call first reads a header from each block
+         of the log region, about 1.1&nbsp;s on the Alliance part, and numbers the epoch above every page left there,
+         starting from 1 on a fresh part.</p>
       <p>The new epoch begins in the first good block at or after the old epoch's write head that holds none of
          its pages, so the log keeps sweeping forward. On a full region, it begins in the full epoch's own first
          block. Its metadata slot is the commit point: until the slot is on the part, the old epoch remains
@@ -536,17 +539,18 @@ uint32_t nandlog_retransmit_count(void);</pre>
     <h2 id="versions">Version macros</h2>
 
     <p><code>nandlog.h</code> versions the library and the on-flash format separately. This release is version
-       1.0 of the library and version&nbsp;1 of the format.</p>
+       1.1 of the library and version&nbsp;2 of the format.</p>
 
 <pre><code>#define NANDLOG_VERSION_MAJOR    1
-#define NANDLOG_VERSION_MINOR    0
+#define NANDLOG_VERSION_MINOR    1
 #define NANDLOG_VERSION_AT_LEAST(major, minor)   /* true if this build is that version or later */
 
-#define NANDLOG_FORMAT_VERSION   1               /* recorded in every metadata slot */</code></pre>
+#define NANDLOG_FORMAT_VERSION   2               /* recorded in every metadata slot */</code></pre>
 
     <p>The major number changes when something you built against has to change to keep working, so an
        application can refuse to build against the wrong one with
        <code>#if (NANDLOG_VERSION_MAJOR != 1)</code>. The minor number changes for additions, such as new
-       functions, options, or chip drivers, and <code>NANDLOG_VERSION_AT_LEAST()</code> tests for them.
+       functions, options, chip drivers, or a new on-flash format, and <code>NANDLOG_VERSION_AT_LEAST()</code>
+       tests for them.
        <code>NANDLOG_FORMAT_VERSION</code> versions what a build writes on the part, and moves independently of
        the library version. See <a href="format.html#format-versions">On-Flash Format</a>.</p>

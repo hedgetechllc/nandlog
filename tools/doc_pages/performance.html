@@ -64,7 +64,7 @@
         <tr><td>&nbsp;&nbsp;A commit whose block fails</td><td>A slot pair recording the failed page, then up to <code>NANDLOG_PAGE_PLACEMENT_ATTEMPTS</code> blocks in all (details below)</td></tr>
         <tr><td><code>nandlog_flush(true)</code></td><td>One page commit</td></tr>
         <tr><td><code>nandlog_flush(false)</code></td><td>None, or the one erase the window is due</td></tr>
-        <tr><td><code>nandlog_begin_epoch()</code></td><td>A commit if records are buffered, a slot written to a pair of pages, then 1&nbsp;+&nbsp;<code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases</td></tr>
+        <tr><td><code>nandlog_begin_epoch()</code></td><td>A commit if records are buffered, a slot written to a pair of pages, then 1&nbsp;+&nbsp;<code>NANDLOG_ERASE_AHEAD_BLOCKS</code> erases. The first on a part whose ring holds no slot also reads a header from each good block of the log region, <strong>O(B)</strong>, to number the epoch</td></tr>
         <tr><td><code>nandlog_retrieve_epoch_details()</code></td><td>1 page read, 2 if the first copy's details do not check</td></tr>
         <tr><td><code>nandlog_epoch_count()</code>, <code>_info()</code></td><td>One 64-byte read per slot walked back over, and about seven per ring block stepped into</td></tr>
         <tr><td><code>nandlog_select_epoch()</code></td><td>The same walk, plus header reads of up to two blocks, from the end back, to find where the epoch ended</td></tr>
@@ -130,6 +130,7 @@
         <tr><td>A commit of a 20-byte partial page</td><td>1</td><td>1</td><td>0</td><td>52</td></tr>
         <tr><td><code>flush(false)</code> carrying the erase-ahead</td><td>0</td><td>0</td><td>1</td><td>2</td></tr>
         <tr><td><code>begin_epoch()</code></td><td>3 (1)</td><td>2</td><td>3</td><td>4,506</td></tr>
+        <tr><td><code>begin_epoch()</code>, the first on a part with no slot</td><td>4,068</td><td>2</td><td>4</td><td>138,398</td></tr>
         <tr><td><code>epoch_count()</code>, 16 listed</td><td>30</td><td>0</td><td>0</td><td>1,596</td></tr>
         <tr><td><code>select_epoch()</code>, an earlier 100-page epoch</td><td>48</td><td>0</td><td>0</td><td>2,240</td></tr>
         <tr><td><code>begin_reading(t0, t1)</code>, 403-page epoch</td><td>504</td><td>0</td><td>0</td><td>17,136</td></tr>
@@ -355,7 +356,8 @@
 
     <h2 id="blocking">Blocking time</h2>
 
-    <p>A call blocks its caller for its flash operations, so the longest calls are a commit and an erase. The same
+    <p>A call blocks its caller for its flash operations, so the longest calls are a commit and an erase, except
+       the first <code>begin_epoch()</code> on a part with no slot, which reads a header from every block. The same
        bench run stores 1,280 pages each of 32-, 256-, and 1,024-byte records:</p>
 
     <div class="tablewrap">
@@ -368,6 +370,7 @@
         <tr><td><code>flush(true)</code> of a 156-byte partial page</td><td>2,086&nbsp;&micro;s</td><td>2,091&nbsp;&micro;s</td></tr>
         <tr><td><code>flush(false)</code> with nothing due</td><td>4.3&nbsp;&micro;s</td><td>4.9&nbsp;&micro;s</td></tr>
         <tr><td><code>begin_epoch()</code></td><td>8.2&nbsp;ms, or 9.9&nbsp;ms entering a ring block</td><td>10.6&nbsp;ms</td></tr>
+        <tr><td><code>begin_epoch()</code>, the first on a part with no slot</td><td>About 1.1&nbsp;s, estimated: 4,066 header reads at 279&nbsp;&micro;s each</td><td>&mdash;</td></tr>
       </tbody>
     </table>
     </div>

@@ -399,12 +399,23 @@ static bool bytes_equal(const uint8_t *a, const uint8_t *b, uint32_t length)
    return !differ;
 }
 
+static bool page_is_format_1(const nandlog_page_header_t *header)
+{
+   return (header->magic == NANDLOG_PAGE_MAGIC_FORMAT_1) || (header->magic == NANDLOG_PAGE_MAGIC_FRAMED_FORMAT_1);
+}
+
 static bool page_header_valid(const nandlog_page_header_t *header)
 {
-   // A page is trustworthy only if it carries the magic and its header checksums correctly
-   return ((header->magic == NANDLOG_PAGE_MAGIC) || (header->magic == NANDLOG_PAGE_MAGIC_FRAMED)) &&
+   // A page is trustworthy only if it carries a known magic and its header checksums correctly
+   return ((header->magic == NANDLOG_PAGE_MAGIC) || (header->magic == NANDLOG_PAGE_MAGIC_FRAMED) || page_is_format_1(header)) &&
           (header->header_crc == crc32_compute(header, NANDLOG_PAGE_HEADER_CRC_BYTES)) &&
           (header->payload_length <= data_bytes_per_page);
+}
+
+static uint32_t page_epoch(const nandlog_page_header_t *header)
+{
+   // An earlier format's page belongs to no epoch, so it is never this epoch's or a newer one's
+   return page_is_format_1(header) ? 0 : header->epoch;
 }
 
 static bool resolve_geometry(void)
@@ -767,8 +778,8 @@ static position_class_t page_class(uint32_t epoch, uint32_t start_page, uint32_t
    // A header that checksums is trusted even when the part could not correct the rest of the page
    if (page_header_valid(&header))
    {
-      search_saw_page_ahead = search_saw_page_ahead || ((header.epoch == epoch) && (header.seq > position));
-      return ((header.epoch == epoch) && (header.seq == position)) ? POSITION_INSIDE : POSITION_OUTSIDE;
+      search_saw_page_ahead = search_saw_page_ahead || ((page_epoch(&header) == epoch) && (header.seq > position));
+      return ((page_epoch(&header) == epoch) && (header.seq == position)) ? POSITION_INSIDE : POSITION_OUTSIDE;
    }
 
    // Only a page with no programmed bit anywhere is evidence of being past the head. An erased-looking header is not
@@ -803,8 +814,8 @@ static uint32_t inside_after(uint32_t epoch, uint32_t start_page, uint32_t candi
       nandlog_chip_read_page_region((uint8_t*)&header, page, 0, sizeof(header));
       if (page_header_valid(&header))
       {
-         search_saw_page_ahead = search_saw_page_ahead || ((header.epoch == epoch) && (header.seq > position));
-         return ((header.epoch == epoch) && (header.seq == position)) ? position : NO_PAGE;
+         search_saw_page_ahead = search_saw_page_ahead || ((page_epoch(&header) == epoch) && (header.seq > position));
+         return ((page_epoch(&header) == epoch) && (header.seq == position)) ? position : NO_PAGE;
       }
       if (nandlog_bytes_erased((const uint8_t*)&header, sizeof(header)) && !list_lost)
          break;
@@ -887,7 +898,7 @@ static bool position_committed(uint32_t position, bool *own)
    const nandlog_read_result_t read = nandlog_chip_read_page(transfer_buffer, page_at_position(starting_page, position));
    nandlog_page_header_t header;
    memcpy(&header, transfer_buffer, sizeof(header));
-   *own = page_header_valid(&header) && (header.epoch == log_epoch) && (header.seq == position);
+   *own = page_header_valid(&header) && (page_epoch(&header) == log_epoch) && (header.seq == position);
    return *own && (read != NANDLOG_READ_UNCORRECTABLE) &&
           (header.payload_crc == crc32_compute(transfer_buffer + sizeof(header), header.payload_length));
 }
@@ -1022,7 +1033,7 @@ static bool adopt_lost_epochs(bool *adopted)
             if (page_header_valid(&header) || nandlog_bytes_erased((const uint8_t*)&header, sizeof(header)))
                break;
          }
-         newer = (offset < pages_per_block) && page_header_valid(&header) && (header.epoch > log_epoch);
+         newer = (offset < pages_per_block) && page_header_valid(&header) && (page_epoch(&header) > log_epoch);
          if (!newer)
             block = next_good_block(block);
       }
@@ -1202,7 +1213,7 @@ static bool relocate_page(uint32_t source, uint32_t destination, uint32_t seq)
    const nandlog_read_result_t read = nandlog_chip_read_page(transfer_buffer, source);
    nandlog_page_header_t header;
    memcpy(&header, transfer_buffer, sizeof(header));
-   const bool own = (read != NANDLOG_READ_UNCORRECTABLE) && page_header_valid(&header) && (header.epoch == log_epoch) && (header.seq == seq);
+   const bool own = (read != NANDLOG_READ_UNCORRECTABLE) && page_header_valid(&header) && (page_epoch(&header) == log_epoch) && (header.seq == seq);
    if (read == NANDLOG_READ_AT_ECC_LIMIT)
       ++stats.reads_at_ecc_limit;
    if (own && NANDLOG_CHIP_PAGE_COPY && (header.payload_crc == crc32_compute(transfer_buffer + sizeof(header), header.payload_length)))
@@ -1938,7 +1949,7 @@ static uint32_t read_view_page(uint32_t page, uint8_t *buffer, nandlog_page_head
    // The payload is copied into 'buffer' if one is given, and '*header_known' says whether 'stored' can be trusted
    const nandlog_read_result_t read = nandlog_chip_read_page(transfer_buffer, page);
    memcpy(stored, transfer_buffer, sizeof(*stored));
-   *header_known = page_header_valid(stored) && (stored->epoch == view_epoch());
+   *header_known = page_header_valid(stored) && (page_epoch(stored) == view_epoch());
    if (!*header_known || (read == NANDLOG_READ_UNCORRECTABLE))
       return 0;
    if (read == NANDLOG_READ_AT_ECC_LIMIT)
@@ -1971,7 +1982,7 @@ static uint32_t seek_position_for_timestamp(uint32_t timestamp, bool at_or_after
       nandlog_page_header_t header;
       nandlog_chip_read_page_region((uint8_t*)&header, page, 0, sizeof(header));
       page = next_good_page(page);
-      if (!page_header_valid(&header) || (header.epoch != view_epoch()))
+      if (!page_header_valid(&header) || (page_epoch(&header) != view_epoch()))
          continue;
       const uint32_t first = header.first_timestamp, last = header.last_timestamp;
       if (at_or_after)
@@ -2005,7 +2016,7 @@ static uint32_t earlier_epoch_positions(uint32_t epoch, uint32_t start_page, uin
       {
          nandlog_page_header_t header;
          nandlog_chip_read_page_region((uint8_t*)&header, first_page_of(block) + offset, 0, sizeof(header));
-         if (page_header_valid(&header) && (header.epoch == epoch))
+         if (page_header_valid(&header) && (page_epoch(&header) == epoch))
             return (block_index * pages_per_block) + offset + 1;
       }
    }
@@ -2024,7 +2035,7 @@ static bool find_position_by_seq(uint32_t seq, uint32_t *position)
          return seq < positions;
       nandlog_page_header_t header;
       nandlog_chip_read_page_region((uint8_t*)&header, view_page(seq), 0, sizeof(header));
-      if (page_header_valid(&header) && (header.epoch == view_epoch()) && (header.seq == seq))
+      if (page_header_valid(&header) && (page_epoch(&header) == view_epoch()) && (header.seq == seq))
          return true;
    }
    uint32_t low = 0, high = positions;
@@ -2037,7 +2048,7 @@ static bool find_position_by_seq(uint32_t seq, uint32_t *position)
       for (; !valid && (probe < high); page = next_good_page(page), ++probe)
       {
          nandlog_chip_read_page_region((uint8_t*)&header, page, 0, sizeof(header));
-         valid = page_header_valid(&header) && (header.epoch == view_epoch());
+         valid = page_header_valid(&header) && (page_epoch(&header) == view_epoch());
       }
       if (!valid)
          high = mid;
@@ -2386,13 +2397,33 @@ static uint32_t block_past_epoch(void)
       {
          nandlog_page_header_t header;
          nandlog_chip_read_page_region((uint8_t*)&header, first_page_of(block) + offset, 0, sizeof(header));
-         if (page_header_valid(&header) && (header.epoch == log_epoch))
+         if (page_header_valid(&header) && (page_epoch(&header) == log_epoch))
          {
             last = block;
             break;
          }
       }
    return (last == NO_BLOCK) ? good_block_at(block_of(starting_page), 0) : next_good_block(last);
+}
+
+static uint32_t highest_epoch_on_part(void)
+{
+   // A block's first readable header speaks for it, since an epoch enters a block at its first page
+   uint32_t highest = 0;
+   for (uint32_t block = log_first_block; block < log_end_block; ++block)
+      for (uint32_t offset = 0; (offset < 2) && !block_retired(block); ++offset)
+      {
+         nandlog_page_header_t header;
+         nandlog_chip_read_page_region((uint8_t*)&header, first_page_of(block) + offset, 0, sizeof(header));
+         if (page_header_valid(&header))
+         {
+            highest = (page_epoch(&header) > highest) ? page_epoch(&header) : highest;
+            break;
+         }
+         if (nandlog_bytes_erased((const uint8_t*)&header, sizeof(header)))
+            break;
+      }
+   return highest;
 }
 
 static bool nandlog_begin_epoch_locked(const void *blob, uint16_t length)
@@ -2432,9 +2463,13 @@ static bool nandlog_begin_epoch_locked(const void *blob, uint16_t length)
    if (new_start == NO_BLOCK)
       return false;
 
+   // With no slot to go by, as after the whole ring is lost, number the epoch above any page this format left
+   const uint32_t highest = has_epoch ? 0 : highest_epoch_on_part();
+   const uint32_t known = (epoch_floor > log_epoch) ? epoch_floor : log_epoch;
+   const uint32_t epoch = ((highest > known) ? highest : known) + 1;
+
    // The slot is the commit point, and the new epoch's blocks are erased only after it is written. Nothing is buffered
    // now, so the slot's image can be built in the cache
-   const uint32_t epoch = has_epoch ? (((epoch_floor > log_epoch) ? epoch_floor : log_epoch) + 1) : 1;
    begin_slot_image(epoch, first_page_of(new_start), blob, length);
    if (!write_metadata_slot(FROM_CACHE, NO_PAGE))
    {

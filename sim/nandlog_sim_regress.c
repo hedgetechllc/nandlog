@@ -5184,6 +5184,150 @@ static void test_p2_details_limit_changed_under_a_log(void)
 }
 
 
+// V: Parts Written by an Earlier Format -------------------------------------------------------------------------------
+
+static void put_older_slot(uint32_t page, uint32_t magic, uint32_t epoch, uint32_t start_page)
+{
+   // A slot as an earlier format wrote one, whose magic this build does not read
+   uint8_t *raw = nandlog_sim_raw_page(page);
+   const uint32_t fields[4] = { magic, epoch, start_page, 0 };
+   memcpy(raw, fields, sizeof(fields));
+   memset(raw + sizeof(fields), 0x5A, 64);
+}
+
+static void older_format_part(void)
+{
+   // Its first boot, and any factory-mark scan, came before the earlier format wrote anything
+   new_part();
+   reboot();
+   nandlog_deinit();
+}
+
+static void put_older_epoch(uint32_t block, uint32_t epoch, uint32_t count, uint32_t first_id)
+{
+   // Format 1's page header is this one's, so its pages checksum under their own magic
+   const uint32_t magic = NANDLOG_RECORD_FRAMING ? NANDLOG_PAGE_MAGIC_FRAMED_FORMAT_1 : NANDLOG_PAGE_MAGIC_FORMAT_1;
+   for (uint32_t i = 0; i < count; ++i)
+      put_page_as((block * ppb()) + i, magic, epoch, i, first_id + i);
+}
+
+static bool details_are(const char *name)
+{
+   uint8_t got[16] = { 0 }, expected[16] = { 0 };
+   strncpy((char*)expected, name, sizeof(expected) - 1);
+   nandlog_begin_session();
+   nandlog_retrieve_epoch_details(got, sizeof(got));
+   nandlog_end_session();
+   return !memcmp(got, expected, sizeof(got));
+}
+
+static void test_v1_earlier_format_epoch_past_the_window(void)
+{
+   // Format 1's epoch 2, just past the window, was taken for a newer epoch whose slot was lost
+   begin_test("V1", "a first epoch begun over format 1's pages keeps its details through a reboot");
+   const uint32_t older = log_first_block() + NANDLOG_ERASE_AHEAD_BLOCKS + 1;
+   older_format_part();
+   put_older_slot(0, 0x324D5454, 1, log_first_block() * ppb());
+   put_older_slot(1, 0x324D5454, 2, older * ppb());
+   put_older_epoch(log_first_block(), 1, ppb(), 20000);
+   put_older_epoch(older, 2, 3 * ppb(), 30000);
+   reboot();
+   const bool begun = begin_epoch("today");
+   reboot();
+   const bool kept = details_are("today");
+   write_pages(10, 100);
+   reboot();
+   const audit_t a = audit_current();
+   const uint32_t older_seen = ids_seen(20000, ppb()) + ids_seen(30000, 3 * ppb());
+   CHECK(begun && kept && (a.positions == 10) && (ids_seen(100, 10) == 10) && !older_seen && !a.damaged,
+         "begun %d, details kept %d; %u positions, %u of 10 pages and %u of format 1's delivered", begun, kept, a.positions,
+         ids_seen(100, 10), older_seen);
+   end_test();
+}
+
+static void test_v2_earlier_first_epoch_at_its_positions(void)
+{
+   // Format 1's epoch 1 also began at the first block, so the write-head search counted its pages
+   begin_test("V2", "a first epoch begun over format 1's epoch 1 is not extended by its pages");
+   const uint32_t older = (log_blocks() / 2) * ppb();
+   older_format_part();
+   put_older_slot(0, 0x314D5454, 1, log_first_block() * ppb());
+   put_older_epoch(log_first_block(), 1, older, 10000);
+   reboot();
+   const bool begun = begin_epoch("today");
+   write_pages(5, 100);
+   reboot();
+   const bool kept = details_are("today");
+   const audit_t a = audit_current();
+   CHECK(begun && kept && (a.positions == 5) && (ids_seen(100, 5) == 5) && !ids_seen(10000, older) && !a.damaged,
+         "begun %d, details kept %d; %u positions, %u of 5 pages and %u of format 1's delivered", begun, kept, a.positions,
+         ids_seen(100, 5), ids_seen(10000, older));
+   end_test();
+}
+
+static void test_v3_earlier_format_pages_cost_nothing(void)
+{
+   // A format 1 page is settled by its header like another epoch's, not walked past as unreadable
+   begin_test("V3", "a warm boot over format 1's pages latches no more than one over erased blocks");
+   uint32_t latches[2] = { 0, 0 };
+   for (uint32_t older = 0; older < 2; ++older)
+   {
+      older_format_part();
+      if (older)
+         put_older_epoch(log_first_block(), 1, (log_blocks() - 1) * ppb(), 0);
+      reboot();
+      begin_epoch("today");
+      write_pages(10, 100);
+      nandlog_sim_reset_counters();
+      reboot();
+      latches[older] = nandlog_sim_counters().page_reads;
+   }
+   CHECK(latches[1] <= latches[0], "a warm boot latched %u pages over format 1's pages and %u over erased blocks", latches[1], latches[0]);
+   end_test();
+}
+
+static void test_v4_lost_ring_numbered_above_its_pages(void)
+{
+   // With every slot gone, an epoch numbered 1 again took the pages after its window for a newer epoch's
+   begin_test("V4", "an epoch begun after the whole ring is lost neither adopts nor counts the pages before it");
+   const uint32_t first = (NANDLOG_ERASE_AHEAD_BLOCKS + 1) * ppb();
+   new_part();
+   reboot();
+   begin_epoch("E1");
+   write_pages(first, 0);
+   begin_epoch("E2");
+   write_pages(2 * ppb(), 1000);
+   nandlog_deinit();
+   for (uint32_t page = 0; page < (METADATA_RING_BLOCKS * ppb()); ++page)
+      memset(nandlog_sim_raw_page(page), 0xFF, page_bytes());
+   reboot();
+   const bool begun = begin_epoch("E3");
+   write_pages(5, 2000);
+   reboot();
+   const bool kept = details_are("E3");
+   const uint32_t epoch = current_epoch();
+   const audit_t a = audit_current();
+   const uint32_t earlier = ids_seen(0, first) + ids_seen(1000, 2 * ppb());
+   CHECK(begun && kept && (epoch > 2) && (a.positions == 5) && (ids_seen(2000, 5) == 5) && !earlier && !a.damaged,
+         "begun %d, details kept %d, epoch %u; %u positions, %u of 5 pages and %u of the earlier epochs' delivered", begun, kept, epoch,
+         a.positions, ids_seen(2000, 5), earlier);
+   end_test();
+}
+
+static void test_v5_begin_epoch_with_a_ring_reads_no_region(void)
+{
+   // Only a part with no slot pays for the pass over the log region
+   begin_test("V5", "beginning an epoch on a part with a ring latches a handful of pages, not one per block");
+   fresh_epoch();
+   write_pages(10, 0);
+   nandlog_sim_reset_counters();
+   begin_epoch("next");
+   const uint32_t latches = nandlog_sim_counters().page_reads;
+   CHECK(latches < 16, "beginning an epoch latched %u pages", latches);
+   end_test();
+}
+
+
 // A test runs if no name was given on the command line, or if its call contains the name given
 static const char *only;
 #define RUN(call)                                   do { if (!only || strstr(#call, only)) call; } while (0)
@@ -5355,6 +5499,12 @@ int main(int argc, char **argv)
    RUN(test_p4_stray_mark_past_the_recorded_span());
    RUN(test_p5_stray_mark_in_the_recorded_span());
 #endif
+
+   RUN(test_v1_earlier_format_epoch_past_the_window());
+   RUN(test_v2_earlier_first_epoch_at_its_positions());
+   RUN(test_v3_earlier_format_pages_cost_nothing());
+   RUN(test_v4_lost_ring_numbered_above_its_pages());
+   RUN(test_v5_begin_epoch_with_a_ring_reads_no_region());
 
    nandlog_deinit();
    nandlog_sim_destroy();

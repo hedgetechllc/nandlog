@@ -288,10 +288,12 @@ that run on real hardware ([tests/README.md](tests/README.md)). The
 #endif
 ```
 
-This is version 1.0. The major number changes when something you built against must change, and the minor number
+This is version 1.1. The major number changes when something you built against must change, and the minor number
 changes for additions, which `NANDLOG_VERSION_AT_LEAST(major, minor)` tests for. A change to the documentation
 alone, including this README, does not change the version. `NANDLOG_FORMAT_VERSION` versions what the library writes
-on the part, separately from the library itself. It is 1, and every metadata slot records it.
+on the part, separately from the library itself. It is 2, and every metadata slot records it. Version 1.1 began
+format 2, which tags pages and slots differently from format 1, so a part written by 1.0 or earlier reads as having no
+epoch, and its pages are recognized and left alone. Offload such a part before updating it.
 
 ## License
 

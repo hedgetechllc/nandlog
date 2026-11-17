@@ -17,12 +17,12 @@
 //     #error "This application was written for major version 1 of nandlog"
 //     #endif
 //
-// The minor number changes for additions: new functions, new policy knobs, new chip drivers, behaviour that
-// does not move a byte on the part and breaks no caller. NANDLOG_VERSION_AT_LEAST() is the test for a feature
-// added in a minor release. Note that this versions the LIBRARY; NANDLOG_FORMAT_VERSION below versions the
-// format a build writes on the part, and the two move independently
+// The minor number changes for additions: new functions, new policy knobs, new chip drivers, a new on-flash
+// format, behaviour that breaks no caller. NANDLOG_VERSION_AT_LEAST() is the test for a feature added in a minor
+// release. Note that this versions the LIBRARY; NANDLOG_FORMAT_VERSION below versions the format a build writes on
+// the part, and the two move independently
 #define NANDLOG_VERSION_MAJOR                       1
-#define NANDLOG_VERSION_MINOR                       0
+#define NANDLOG_VERSION_MINOR                       1
 
 #define NANDLOG_VERSION_AT_LEAST(major, minor)      ((NANDLOG_VERSION_MAJOR > (major)) || \
                                                     ((NANDLOG_VERSION_MAJOR == (major)) && (NANDLOG_VERSION_MINOR >= (minor))))
@@ -35,16 +35,20 @@
 
 #define NANDLOG_NO_TIMESTAMP                        0xFFFFFFFF
 
-// A page states its own record format in the four bytes a reader looks at first
-#define NANDLOG_PAGE_MAGIC                          0x31505454   // 'TTP1': records are opaque to the log
-#define NANDLOG_PAGE_MAGIC_FRAMED                   0x32505454   // 'TTP2': each record carries its own length
+// A page states its on-flash format and record format in the four bytes a reader looks at first
+#define NANDLOG_PAGE_MAGIC                          0x33505454   // 'TTP3': records are opaque to the log
+#define NANDLOG_PAGE_MAGIC_FRAMED                   0x34505454   // 'TTP4': each record carries its own length
+
+// Format 1's page magics. Its pages still checksum, so they are recognized, and belong to no epoch
+#define NANDLOG_PAGE_MAGIC_FORMAT_1                 0x31505454   // 'TTP1'
+#define NANDLOG_PAGE_MAGIC_FRAMED_FORMAT_1          0x32505454   // 'TTP2'
 
 #define NANDLOG_FRAMING_LENGTH_BYTES                2
 
 #define NANDLOG_PAGE_MAGIC_THIS_BUILD               (NANDLOG_RECORD_FRAMING ? NANDLOG_PAGE_MAGIC_FRAMED : NANDLOG_PAGE_MAGIC)
 
-// The version of the on-flash format, recorded in every metadata slot
-#define NANDLOG_FORMAT_VERSION                      1
+// The version of the on-flash format, recorded in every metadata slot. Each version has its own page and slot magics
+#define NANDLOG_FORMAT_VERSION                      2
 
 // The record format: opaque records, or records that carry their own length. A page states it in its magic, and an
 // offload stream in its header
@@ -79,8 +83,8 @@ typedef struct __attribute__ ((__packed__))
 
 // A metadata slot describes one epoch: the header, nandlog_meta_extension_t, the details, then the list of positions
 // the epoch has passed over. Each slot is written to both pages of a pair, so one unreadable page does not lose it
-// and a boot can tell a finished write from one a power cut interrupted. The digit in the magic is not a version
-#define NANDLOG_META_MAGIC                          0x324D5454   // 'TTM2', little-endian
+// and a boot can tell a finished write from one a power cut interrupted. Slots of an earlier format are not read
+#define NANDLOG_META_MAGIC                          0x334D5454   // 'TTM3', little-endian
 
 typedef struct __attribute__ ((__packed__))
 {
@@ -228,8 +232,10 @@ uint32_t nandlog_data_bytes_per_page(void);
 // Begin a new epoch, described by an opaque caller-defined blob of at most NANDLOG_MAX_EPOCH_DETAILS_BYTES. The
 // log neither reads nor interprets the blob. Anything still buffered is committed to the old epoch first, and
 // everything logged previously stays on the part, but reads cover only the current epoch unless another is
-// selected. Must be called inside a session with no read open, and returns false if it was not, if the blob is
-// too large, if the buffered records could not be committed, or if no slot in the metadata ring would take it
+// selected. On a part whose ring holds no slot, the first epoch is numbered above every page left on the part, found
+// with one header read per block of the log region. Must be called inside a session with no read open, and returns
+// false if it was not, if the blob is too large, if the buffered records could not be committed, or if no slot in
+// the metadata ring would take it
 bool nandlog_begin_epoch(const void *blob, uint16_t length);
 
 // Copy back the details of whichever epoch is currently selected, truncated to 'length'. Zero-fills if there

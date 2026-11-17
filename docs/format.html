@@ -12,7 +12,7 @@
 <a class="skip" href="#content">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="index.html">nandlog</a>
-  <span class="ver">v1.0</span>
+  <span class="ver">v1.1</span>
   <input type="checkbox" id="navtoggle" hidden>
   <label for="navtoggle" class="navbtn" aria-label="Menu">&#9776;</label>
   <nav class="sidenav">
@@ -137,7 +137,7 @@
     <table>
       <thead><tr><th>Offset</th><th>Size</th><th>Field</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x31505454</code> ('TTP1'): opaque records. <code>0x32505454</code> ('TTP2'): framed records</td></tr>
+        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x33505454</code> ('TTP3'): opaque records. <code>0x34505454</code> ('TTP4'): framed records</td></tr>
         <tr><td>4</td><td>4</td><td><code>epoch</code></td><td>The epoch this page belongs to</td></tr>
         <tr><td>8</td><td>4</td><td><code>seq</code></td><td>Sequence number within the epoch, from 0</td></tr>
         <tr><td>12</td><td>4</td><td><code>first_timestamp</code></td><td>Smallest record timestamp in the page, or <code>0xFFFFFFFF</code> if it has no records</td></tr>
@@ -245,7 +245,7 @@
        by page. Records are never split across pages, and <code>nandlog_store_record()</code> refuses a record that
        cannot fit in an empty page with <code>NANDLOG_ERR_TOO_LARGE</code>.</p>
 
-    <p><strong>Framed ('TTP2', the default).</strong> With <code>NANDLOG_RECORD_FRAMING</code> on, each record
+    <p><strong>Framed ('TTP4', the default).</strong> With <code>NANDLOG_RECORD_FRAMING</code> on, each record
        is:</p>
 
 <pre><code>[data length: 2][record type: 1][timestamp: 4][data: data length]</code></pre>
@@ -255,7 +255,7 @@
        types. <code>nandlog_framed_next_record()</code> does this on the device, and stops at a record that would run
        past the payload.</p>
 
-    <p><strong>Opaque ('TTP1').</strong> With framing off, each record is:</p>
+    <p><strong>Opaque ('TTP3').</strong> With framing off, each record is:</p>
 
 <pre><code>[record type: 1][timestamp: 4][data]</code></pre>
 
@@ -277,12 +277,12 @@
     <table>
       <thead><tr><th>Offset</th><th>Size</th><th>Field</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x324D5454</code> ('TTM2')</td></tr>
+        <tr><td>0</td><td>4</td><td><code>magic</code></td><td><code>0x334D5454</code> ('TTM3')</td></tr>
         <tr><td>4</td><td>4</td><td><code>epoch</code></td><td>The epoch this slot describes</td></tr>
         <tr><td>8</td><td>4</td><td><code>log_start_page</code></td><td>First page of the block the epoch began in</td></tr>
         <tr><td>12</td><td>4</td><td><code>created_timestamp</code></td><td>Always 0, since the log reads no clock</td></tr>
         <tr><td>16</td><td>2</td><td><code>details_length</code></td><td>Bytes of caller-defined details</td></tr>
-        <tr><td>18</td><td>2</td><td><code>format_version</code></td><td><code>NANDLOG_FORMAT_VERSION</code>: 1</td></tr>
+        <tr><td>18</td><td>2</td><td><code>format_version</code></td><td><code>NANDLOG_FORMAT_VERSION</code>: 2</td></tr>
         <tr><td>20</td><td>4</td><td><code>details_crc</code></td><td>CRC-32 over the details</td></tr>
         <tr><td>24</td><td>4</td><td><code>header_crc</code></td><td>CRC-32 over bytes 0&ndash;23</td></tr>
         <tr><td>28</td><td>4</td><td><code>reserved</code></td><td><code>0xFFFFFFFF</code>, not covered by <code>header_crc</code></td></tr>
@@ -525,15 +525,29 @@
     <table>
       <thead><tr><th>Macro</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>NANDLOG_FORMAT_VERSION</code></td><td>The on-flash format a build writes: 1. Every metadata slot records it, and the 1.0 library does not check it when it reads.</td></tr>
+        <tr><td><code>NANDLOG_FORMAT_VERSION</code></td><td>The on-flash format a build writes: 2. Every metadata slot records it, but a reader goes by the magics, which each format has its own of.</td></tr>
         <tr><td><code>NANDLOG_RECORD_FORMAT_THIS_BUILD</code></td><td>The record format a build writes: 1 opaque, 2 framed. It follows <code>NANDLOG_RECORD_FRAMING</code>. A page states it in its magic, a stream in its header.</td></tr>
-        <tr><td><code>NANDLOG_VERSION_MAJOR</code> / <code>_MINOR</code></td><td>The library API: 1.0. It is independent of the formats.</td></tr>
+        <tr><td><code>NANDLOG_VERSION_MAJOR</code> / <code>_MINOR</code></td><td>The library API: 1.1. It is independent of the formats.</td></tr>
       </tbody>
     </table>
     </div>
 
-    <p>The digits in the magics (<code>TTP1</code>, <code>TTP2</code>, <code>TTM2</code>, <code>TTS1</code>,
-       <code>BBT3</code>, and the OTP marker <code>BBT2</code>) are part of the tags, not version numbers.</p>
+    <p>The digits in the magics (<code>TTP3</code>, <code>TTP4</code>, <code>TTM3</code>, <code>TTS1</code>,
+       <code>BBT3</code>, and the OTP marker <code>BBT2</code>) are part of the tags, not version numbers. Each
+       on-flash format has its own page and slot magics, and the stream, table, and OTP tags change only when their
+       own layouts do.</p>
+
+    <p><strong>Parts written in format 1.</strong> Format 1, which every release up to 1.0 wrote, tagged its pages
+       <code>TTP1</code> and <code>TTP2</code>, and its slots <code>TTM1</code> or <code>TTM2</code>. This library
+       does not read those slots, so it finds no epoch on such a part. It does recognize those pages, whose header
+       is this format's, and treats each as belonging to no epoch: a boot settles it with one header read, as it
+       would another epoch's page, and never adopts it or counts it as the current epoch's. Format 1 pages stay on the
+       part until the log erases their blocks, and are not readable through the API.</p>
+
+    <p><strong>The first epoch on a part with no slot.</strong> With nothing in the ring to number from, as on a
+       fresh part or one whose whole ring was lost, <code>nandlog_begin_epoch()</code> reads a header from each block
+       of the log region and numbers the epoch above every epoch this format's pages name. Without that, a part whose
+       ring was lost would begin again at epoch 1 among its own earlier pages.</p>
 
     <h2 id="newest-epoch">Finding the newest epoch</h2>
 

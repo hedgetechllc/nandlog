@@ -189,6 +189,10 @@ if (nandlog_epoch_count() == 0)                 /* a fresh part: no epoch yet */
    nandlog_begin_epoch(&amp;details, sizeof(details));
 nandlog_end_session();</code></pre>
 
+    <p>A part written by 1.0 or earlier also reports no epoch, and is safe to begin one on the same way. Its data
+       is not readable by this release, so offload it first (see
+       <a href="format.html#format-versions">Format versions</a>).</p>
+
     <p>The details blob is yours, up to <code>NANDLOG_MAX_EPOCH_DETAILS_BYTES</code>. The log stores it,
        checksums it, and hands it back, but never looks inside, so it is a good place for a device ID, a start
        time, or a mission name. Begin a new epoch whenever you want a fresh log (for example, at the start of

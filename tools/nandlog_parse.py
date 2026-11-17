@@ -25,7 +25,7 @@ includes the Alliance driver's bad-block table it is read and the retired blocks
 copy of each (epoch, sequence number) is kept, preferring one whose payload verifies. A page relocated after
 it had become unreadable arrives as a TOMBSTONE: a valid header with its sequence number and no payload.
 
-A metadata slot ('TTM2') is the 32-byte header, a 32-byte extension (the slot's sequence number in the order the ring
+A metadata slot ('TTM3') is the 32-byte header, a 32-byte extension (the slot's sequence number in the order the ring
 was written; a failed write-head page or 0xFFFFFFFF; how many blocks were retired when it was written, and a
 fingerprint of which of the epoch's first blocks were; a zero byte; a seal, 0 once the epoch takes no more pages; how
 many runs of passed-over positions follow the details, and their CRC; and a CRC over all 60 bytes before it), the
@@ -36,7 +36,8 @@ the magic 'BBT3', in the first blocks of the reserve or -- on a part whose reser
 blocks below it, which every version written there names as retired. A block carrying a bad-block mark is passed over
 whatever versions it holds -- but for a mark of one programmed bit, a stray one, on a block holding a version newer than
 the newest elsewhere, which that version does not name; with no version left anywhere the marks themselves name the
-retired blocks. The digits in these magics are part of the tags, not versions.
+retired blocks. The digits in these magics are part of the tags, not versions. The pages and slots of format 1
+('TTP1', 'TTP2', 'TTM2') belong to no epoch here, as in the library, and are skipped.
 """
 
 import argparse
@@ -45,10 +46,10 @@ import struct
 import sys
 import zlib
 
-PAGE_MAGIC = 0x31505454        # 'TTP1', little-endian: records are opaque
-PAGE_MAGIC_FRAMED = 0x32505454 # 'TTP2': each record carries its own length
+PAGE_MAGIC = 0x33505454        # 'TTP3', little-endian: records are opaque
+PAGE_MAGIC_FRAMED = 0x34505454 # 'TTP4': each record carries its own length
 FRAMING_LENGTH = struct.Struct("<H")   # the per-record data length that framing prefixes
-META_MAGIC = 0x324D5454        # 'TTM2': a metadata slot
+META_MAGIC = 0x334D5454        # 'TTM3': a metadata slot
 STREAM_MAGIC = 0x31535454      # 'TTS1'
 RECORD_FORMAT_OPAQUE = 1       # a stream header's record_format: records opaque
 RECORD_FORMAT_FRAMED = 2       # ... or each carrying its own length
